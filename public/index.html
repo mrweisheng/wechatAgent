@@ -1,0 +1,755 @@
+<!DOCTYPE html>
+<html lang="zh-HK">
+<head>
+<meta charset="UTF-8">
+<title>明哥中港牌 · 朋友圈 Agent</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  :root {
+    --bg: #fafaf7;
+    --fg: #2a2a2a;
+    --accent: #4a4a4a;
+    --line: #e8e6e0;
+    --pass: #2f7a4f;
+    --warn: #b75a3c;
+    --card: #ffffff;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font-family: -apple-system, "PingFang HK", "Microsoft JhengHei", serif;
+    background: var(--bg);
+    color: var(--fg);
+    line-height: 1.65;
+  }
+  header {
+    padding: 24px 32px;
+    border-bottom: 1px solid var(--line);
+    background: var(--card);
+  }
+  header h1 {
+    margin: 0;
+    font-size: 18px;
+    font-weight: 500;
+    letter-spacing: 0.5px;
+  }
+  header .sub {
+    font-size: 12px;
+    color: #999;
+    margin-top: 4px;
+  }
+  main {
+    max-width: 880px;
+    margin: 0 auto;
+    padding: 24px 32px 80px;
+  }
+  .input-card {
+    background: var(--card);
+    border: 1px solid var(--line);
+    border-radius: 4px;
+    padding: 20px;
+  }
+  .input-card textarea {
+    width: 100%;
+    border: none;
+    outline: none;
+    resize: vertical;
+    min-height: 70px;
+    font-size: 15px;
+    font-family: inherit;
+    background: transparent;
+    color: var(--fg);
+  }
+  .input-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-top: 12px;
+    gap: 12px;
+  }
+  .input-row label {
+    cursor: pointer;
+    font-size: 13px;
+    color: var(--accent);
+    padding: 6px 10px;
+    border: 1px solid var(--line);
+    border-radius: 4px;
+  }
+  .input-row label:hover { background: #f5f4ef; }
+  input[type=file] { display: none; }
+  button {
+    cursor: pointer;
+    font-family: inherit;
+    border: none;
+    background: #2a2a2a;
+    color: #fff;
+    padding: 8px 18px;
+    font-size: 14px;
+    border-radius: 4px;
+    letter-spacing: 0.5px;
+  }
+  button.secondary {
+    background: transparent;
+    color: var(--accent);
+    border: 1px solid var(--line);
+  }
+  button:disabled { opacity: 0.5; cursor: not-allowed; }
+  .preview {
+    margin-top: 16px;
+  }
+  .scene-tag {
+    display: inline-block;
+    font-size: 11px;
+    padding: 2px 8px;
+    background: #f0efe9;
+    color: var(--accent);
+    border-radius: 2px;
+    margin-bottom: 12px;
+    letter-spacing: 1px;
+  }
+  .versions {
+    display: grid;
+    gap: 14px;
+  }
+  .version {
+    background: var(--card);
+    border: 1px solid var(--line);
+    border-radius: 4px;
+    padding: 18px 20px;
+  }
+  .version .meta {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    font-size: 11px;
+    color: #999;
+    margin-bottom: 8px;
+  }
+  .version .meta .angle {
+    background: #f5f4ef;
+    padding: 2px 8px;
+    border-radius: 2px;
+    color: var(--accent);
+  }
+  .version-text {
+    white-space: pre-wrap;
+    font-size: 15px;
+    line-height: 1.8;
+  }
+  .version-actions {
+    margin-top: 12px;
+    display: flex;
+    gap: 8px;
+    flex-wrap: wrap;
+  }
+  .version-actions button {
+    font-size: 12px;
+    padding: 5px 10px;
+  }
+  .hard-check {
+    margin-top: 10px;
+    font-size: 12px;
+  }
+  .hard-check.pass { color: var(--pass); }
+  .hard-check.warn { color: var(--warn); }
+  .feedback-box {
+    margin-top: 8px;
+    padding: 10px;
+    background: #f8f7f2;
+    border-radius: 4px;
+    font-size: 13px;
+  }
+  .feedback-box textarea {
+    width: 100%;
+    border: 1px solid var(--line);
+    border-radius: 4px;
+    padding: 6px 8px;
+    font-family: inherit;
+    font-size: 13px;
+    min-height: 50px;
+  }
+  .image-plan {
+    margin-top: 16px;
+    background: var(--card);
+    border: 1px solid var(--line);
+    padding: 14px 16px;
+    border-radius: 4px;
+    font-size: 13px;
+    color: var(--accent);
+  }
+  .image-plan b {
+    display: block;
+    margin-bottom: 4px;
+    font-size: 12px;
+    color: #888;
+    letter-spacing: 1px;
+  }
+  .questions {
+    background: #f8f7f2;
+    padding: 14px 16px;
+    border-radius: 4px;
+    margin-top: 12px;
+    font-size: 13px;
+  }
+  .questions b {
+    display: block;
+    margin-bottom: 6px;
+    color: var(--accent);
+  }
+  .demo-hint {
+    background: #fdf6e3;
+    color: #8a6d3b;
+    padding: 8px 12px;
+    font-size: 12px;
+    border-radius: 4px;
+    margin-top: 12px;
+  }
+  .err-hint {
+    background: #fdeceb;
+    color: #9c2b1f;
+    padding: 10px 14px;
+    font-size: 13px;
+    border-radius: 4px;
+    margin: 12px 0;
+    line-height: 1.6;
+  }
+  .warn-hint {
+    background: #fff8e6;
+    color: #8a6d3b;
+    padding: 8px 12px;
+    font-size: 12px;
+    border-radius: 4px;
+    margin-top: 8px;
+  }
+  .gate {
+    max-width: 380px;
+    margin: 80px auto;
+    background: var(--card);
+    border: 1px solid var(--line);
+    border-radius: 4px;
+    padding: 28px;
+    text-align: center;
+  }
+  .gate h2 { margin: 0 0 6px; font-size: 15px; font-weight: 500; }
+  .gate p { margin: 0 0 18px; font-size: 12px; color: #999; }
+  .gate input {
+    width: 100%;
+    border: 1px solid var(--line);
+    border-radius: 4px;
+    padding: 9px 12px;
+    font-size: 14px;
+    font-family: inherit;
+    margin-bottom: 12px;
+    box-sizing: border-box;
+  }
+  .copy-blocked { opacity: .5; }
+  .corrections {
+    margin-top: 32px;
+    padding-top: 24px;
+    border-top: 1px solid var(--line);
+  }
+  .corrections h3 {
+    margin: 0 0 12px;
+    font-size: 13px;
+    color: #888;
+    letter-spacing: 1px;
+    font-weight: 500;
+  }
+  .corrections input, .corrections select {
+    border: 1px solid var(--line);
+    background: #fff;
+    padding: 6px 10px;
+    border-radius: 4px;
+    font-family: inherit;
+    font-size: 13px;
+    margin-right: 6px;
+  }
+  .corrections input[type=text] { width: 200px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>明哥中港牌 · 朋友圈 Agent</h1>
+  <div class="sub">输入文字、上传图片，Agent 输出三版文案 + 配图建议</div>
+</header>
+<main>
+ <div id="app">
+  <div class="input-card">
+    <textarea id="text" placeholder="例：今日收工帶隊去深圳食飯 / 交咗部40系埃爾法畀陳生 / 寫個中秋文案"></textarea>
+    <div class="input-row">
+      <label for="image">
+        <span id="file-label">📎 添加图片（可选）</span>
+        <input type="file" id="image" accept="image/*" multiple>
+      </label>
+      <button id="generate">生成三版</button>
+    </div>
+  </div>
+
+  <div id="questions" style="display:none"></div>
+  <div class="preview" id="preview"></div>
+
+  <div class="corrections">
+    <h3>CORRECTION · 纠错入库</h3>
+    <div>
+      <input id="c-original" type="text" placeholder="错误原文">
+      <input id="c-corrected" type="text" placeholder="纠正后">
+      <select id="c-type">
+        <option value="事实">事实</option>
+        <option value="风格">风格</option>
+        <option value="合规">合规</option>
+        <option value="格式">格式</option>
+      </select>
+      <button id="c-submit" class="secondary">入库</button>
+    </div>
+    <div id="c-list" style="margin-top:10px; font-size:12px; color:#888;"></div>
+  </div>
+
+  <div class="corrections" id="history-section">
+    <h3><button id="history-toggle" class="secondary" style="padding:4px 12px;font-size:12px">HISTORY · 生成历史 ▸</button></h3>
+    <div id="history-list" style="display:none; font-size:13px;"></div>
+  </div>
+
+  <div class="corrections" id="intel-section">
+    <h3><button id="intel-toggle" class="secondary" style="padding:4px 12px;font-size:12px">INTEL · 情报线（谈资素材，永不自动发布） ▸</button></h3>
+    <div id="intel-list" style="display:none; font-size:13px;"></div>
+  </div>
+ </div>
+</main>
+
+<script>
+// =====================================================================
+// 前端逻辑
+// 修复点（对照审核）：
+//  1. 补登录 UI —— 原先 inviteToken 只读不写，配了邀请码后整个应用不可用
+//  2. 401 统一处理 —— 原先无分支，data.versions.map 遇 undefined 直接 TypeError 白屏
+//  3. 显示后端 error —— 原先 LLM 失败返回 200+假文案，界面无任何提示
+//  4. XSS —— angle/tone/violation msg 此前未转义直接进 innerHTML
+//  5. pass=false 时禁用复制 —— 原先违规文案照样能一键复制
+//  6. c-type 取真实下拉值 —— 原先硬编码 '风格'，用户选择被丢弃
+//  7. 健康检查走 callApi 并 catch —— 原先裸 fetch 无鉴权头，401 后 r.json() 抛异常
+// =====================================================================
+const $ = (s) => document.querySelector(s);
+const previewEl = $('#preview');
+const qEl = $('#questions');
+const appEl = $('#app');
+
+let inviteToken = localStorage.getItem('invite') || '';
+let authRequired = false;
+
+function escapeHtml(s) {
+  return String(s == null ? '' : s).replace(/[&<>"']/g, c =>
+    ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c])
+  );
+}
+
+// 一键复制：clipboard API 仅 HTTPS/localhost 可用，公网裸 HTTP 部署会静默失效，
+// 必须留 execCommand 降级路径（D-3 核心交互）
+function copyText(t) {
+  if (navigator.clipboard && window.isSecureContext) {
+    return navigator.clipboard.writeText(t);
+  }
+  return new Promise((resolve, reject) => {
+    const ta = document.createElement('textarea');
+    ta.value = t;
+    ta.style.position = 'fixed';
+    ta.style.opacity = '0';
+    document.body.appendChild(ta);
+    ta.focus(); ta.select();
+    let ok = false;
+    try { ok = document.execCommand('copy'); } catch (e) { ok = false; }
+    ta.remove();
+    ok ? resolve() : reject(new Error('copy failed'));
+  });
+}
+
+async function callApi(path, opts = {}) {
+  const headers = Object.assign({}, opts.headers || {});
+  if (inviteToken) headers['x-invite-code'] = inviteToken;
+  let r;
+  try {
+    r = await fetch(path, Object.assign({}, opts, { headers }));
+  } catch (e) {
+    return { ok: false, error: '无法连接服务器，请确认服务已启动', network: true };
+  }
+  let data;
+  try {
+    data = await r.json();
+  } catch {
+    return { ok: false, error: '服务器返回了非 JSON 响应（HTTP ' + r.status + '）' };
+  }
+  if (r.status === 401) {
+    inviteToken = '';
+    localStorage.removeItem('invite');
+    return { ok: false, error: '未授权，请重新输入邀请码', unauthorized: true };
+  }
+  if (!r.ok && data.ok !== false) data.ok = false;
+  return data;
+}
+
+// ---------- 登录闸门 ----------
+function showGate(message) {
+  appEl.style.display = 'none';
+  let gate = $('#gate');
+  if (!gate) {
+    gate = document.createElement('div');
+    gate.id = 'gate';
+    gate.className = 'gate';
+    document.querySelector('main').prepend(gate);
+  }
+  gate.innerHTML = `
+    <h2>明哥中港牌 · 朋友圈 Agent</h2>
+    <p>${escapeHtml(message || '请输入邀请码')}</p>
+    <input id="gate-code" type="password" placeholder="邀请码" autocomplete="current-password">
+    <button id="gate-btn" style="width:100%">进入</button>
+    <div id="gate-err" class="err-hint" style="display:none"></div>
+  `;
+  const submit = async () => {
+    const code = $('#gate-code').value.trim();
+    if (!code) return;
+    const r = await callApi('/api/login', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ code })
+    });
+    if (r.ok) {
+      inviteToken = r.token;
+      localStorage.setItem('invite', r.token);
+      gate.remove();
+      appEl.style.display = '';
+      boot();
+    } else {
+      const e = $('#gate-err');
+      e.style.display = 'block';
+      e.textContent = r.error || '邀请码错误';
+    }
+  };
+  $('#gate-btn').onclick = submit;
+  $('#gate-code').onkeydown = e => { if (e.key === 'Enter') submit(); };
+  $('#gate-code').focus();
+}
+
+// ---------- 渲染：三版文案 ----------
+function renderVersions(data) {
+  const sceneName = {
+    business: '業務動態', car: '車源 / 交車', greeting: '早安',
+    festival: '節日', edu: '科普', daily: '日常', unknown: '通用'
+  }[data.scene] || data.scene;
+
+  const banners = [];
+  if (data.demo) {
+    banners.push('<div class="demo-hint">⚠️ <b>演示版本</b>：未配置有效 DEEPSEEK_API_KEY，以下为示例文案，<b>请勿直接发布</b>。</div>');
+  }
+  if (data.error) {
+    banners.push('<div class="err-hint"><b>生成失败：</b>' + escapeHtml(data.error) + '</div>');
+  }
+  if (data.parseFailed) {
+    banners.push('<div class="err-hint"><b>解析失败：</b>' + escapeHtml(data.parseNote || 'LLM 输出格式异常') + '</div>');
+  }
+  if (data.warning) {
+    banners.push('<div class="warn-hint">⚠️ ' + escapeHtml(data.warning) + '</div>');
+  }
+  if (data.degraded && !data.warning) {
+    const reasonMap = {
+      llm_not_configured: '视觉模型未配置，本次仅依据文字生成。',
+      llm_call_failed: '视觉识别调用失败（网络/网关/图片格式），本次仅依据文字生成；HEIC 大图建议转 JPG 重试。',
+      llm_parse_failed: '视觉识别返回结果异常，本次仅依据文字生成。',
+      llm_empty: '视觉识别返回为空，本次仅依据文字生成。'
+    };
+    banners.push('<div class="warn-hint">⚠️ ' + escapeHtml(reasonMap[data.degradedReason] || '视觉识别未启用，本次仅依据文字生成。') + '</div>');
+  }
+
+  const versionsHtml = (data.versions || []).map((v, i) => {
+    const hc = v.hardCheck || { pass: true, violations: [], warnings: [], checked: 0, declared: 0 };
+    const vHtml = hc.violations.map(x => escapeHtml(x.msg)).join('；');
+    const wHtml = (hc.warnings || []).map(x => escapeHtml(x.msg)).join('；');
+    const sc = v.score;
+    const dimText = sc && sc.dims
+      ? '高級感 ' + sc.dims.premium + '/5 · 新意 ' + sc.dims.novelty + '/5 · 調性 ' + sc.dims.tone + '/5'
+      : '高級感 ' + (sc ? sc.premium : '?') + ' · 新意 ' + (sc ? sc.novelty : '?') + ' · 調性 ' + (sc ? sc.tone : '?');
+    const scoreHtml = !sc || sc.total == null
+      ? ''
+      : '<div class="hard-check" style="color:' + (sc.total >= 70 ? 'var(--pass)' : 'var(--warn)') + '" title="' + escapeHtml(sc.reason || '') + '">' +
+        '軟評分 ' + sc.total + '（' + dimText + '）' +
+        (sc.total < 70 ? ' — 未達 70 分' : '') + '</div>';
+    const simHtml = (v.similarity != null && v.similarity >= 0.6)
+      ? '<div class="hard-check" style="color:var(--warn)">🔁 與歷史文案相似度 ' + v.similarity + '，注意「越寫越像」</div>'
+      : '';
+    const rwHtml = v.rewrites ? '<div class="hard-check" style="color:#bbb">已按質檢反饋重寫 ' + v.rewrites + ' 次</div>' : '';
+    const checkHtml =
+      (hc.pass
+        ? '<div class="hard-check pass">✓ 通過 ' + hc.checked + ' 項已實現規則</div>'
+        : '<div class="hard-check warn">✗ 違規：' + vHtml + '</div>') +
+      scoreHtml + simHtml + rwHtml +
+      (wHtml ? '<div class="hard-check" style="color:#8a6d3b">⚠ 提示：' + wHtml + '</div>' : '') +
+      (hc.unimplemented && hc.unimplemented.length
+        ? '<div class="hard-check" style="color:#bbb">未評估：' + escapeHtml(hc.unimplemented.join('、')) + '</div>'
+        : '');
+
+    return `
+      <div class="version${hc.pass ? '' : ' copy-blocked'}">
+        <div class="meta">
+          <span class="angle">${escapeHtml(v.angle)} · ${escapeHtml(v.tone)}</span>
+          <span>版本 ${i + 1}</span>
+        </div>
+        <div class="version-text">${escapeHtml(v.text)}</div>
+        ${checkHtml}
+        <div class="version-actions">
+          <button data-copy="${i}" ${hc.pass ? '' : 'disabled title="未通过硬规则校验，已禁止复制"'}>複製文案</button>
+          <button class="secondary" data-pick="${i}">選中此版</button>
+          <button class="secondary" data-edit="${i}">編輯反饋</button>
+        </div>
+        <div class="feedback-box" data-editbox="${i}" style="display:none">
+          <textarea placeholder="直接修改文案，提交后按「纠错入库」处理"></textarea>
+          <div style="margin-top:6px">
+            <select class="corr-type" style="padding:5px 8px;border:1px solid var(--line);border-radius:4px;font-size:12px">
+              <option value="風格">風格</option>
+              <option value="事實">事實</option>
+              <option value="合規">合規</option>
+              <option value="格式">格式</option>
+            </select>
+            <button data-save="${i}" class="secondary">提交糾錯</button>
+          </div>
+        </div>
+      </div>`;
+  }).join('');
+
+  previewEl.innerHTML = `
+    ${banners.join('')}
+    <div class="scene-tag">場景 · ${escapeHtml(sceneName)}${data.candidates > (data.versions || []).length ? ' ｜ 已從 ' + data.candidates + ' 個候選中篩出最優 ' + (data.versions || []).length + ' 版' : ''}</div>
+    <div class="versions">${versionsHtml}</div>
+    ${data.imagePlan ? '<div class="image-plan"><b>配圖指引</b>' + escapeHtml(data.imagePlan) + '</div>' : ''}
+    ${data.sceneNotes ? '<div class="image-plan" style="margin-top:8px"><b>寫作理由</b>' + escapeHtml(data.sceneNotes) + '</div>' : ''}
+  `;
+
+  document.querySelectorAll('[data-copy]').forEach(b => {
+    b.onclick = () => {
+      const i = +b.dataset.copy;
+      copyText(data.versions[i].text)
+        .then(() => { b.textContent = '已複製 ✓'; })
+        .catch(() => {
+          b.textContent = '複製失敗，請手動選擇正文複製';
+          setTimeout(() => { b.textContent = '複製文案'; }, 2500);
+        });
+    };
+  });
+
+  document.querySelectorAll('[data-pick]').forEach(b => {
+    b.onclick = async () => {
+      const i = +b.dataset.pick;
+      const v = data.versions[i];
+      // text + pass 一并上报：语气资产库（getToneSamples）只沉淀硬规则通过且被选中的正文
+      const r = await callApi('/api/feedback', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          kind: 'pick',
+          payload: {
+            scene: data.scene, index: i,
+            angle: v.angle, tone: v.tone,
+            text: v.text,
+            pass: !(v.hardCheck && v.hardCheck.pass === false)
+          }
+        })
+      });
+      b.textContent = r.ok ? '已記錄 ✓' : '記錄失敗';
+    };
+  });
+
+  document.querySelectorAll('[data-edit]').forEach(b => {
+    b.onclick = () => {
+      const box = document.querySelector('[data-editbox="' + b.dataset.edit + '"]');
+      box.style.display = box.style.display === 'none' ? 'block' : 'none';
+    };
+  });
+
+  document.querySelectorAll('[data-save]').forEach(b => {
+    b.onclick = async () => {
+      const i = +b.dataset.save;
+      const box = document.querySelector('[data-editbox="' + i + '"]');
+      const edited = box.querySelector('textarea').value;
+      const type = box.querySelector('.corr-type').value;
+      if (!edited.trim()) { alert('请先修改文案'); return; }
+      await callApi('/api/feedback', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ kind: 'edit', payload: { scene: data.scene, index: i, edited } })
+      });
+      const r = await callApi('/api/correction', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          original: data.versions[i].text,
+          corrected: edited,
+          type: type,
+          scene: data.scene
+        })
+      });
+      b.textContent = r.ok ? '已入庫 ✓' : '入庫失敗';
+      if (r.ok) loadCorrections();
+    };
+  });
+}
+
+function renderQuestions(data) {
+  qEl.style.display = 'block';
+  qEl.innerHTML = `
+    <div class="questions">
+      <b>已理解：${escapeHtml(data.understood || '(无)')}（場景：${escapeHtml(data.scene)}）</b>
+      還需補充：${(data.questions || []).map(q => escapeHtml(q)).join('；')}
+    </div>`;
+}
+
+// ---------- 启动 ----------
+async function boot() {
+  const h = await callApi('/api/health');
+  if (h.unauthorized) { showGate(); return; }
+  if (!h.ok) return;
+
+  if (!h.llm) {
+    previewEl.innerHTML = '<div class="demo-hint">⚠️ ' +
+      escapeHtml(h.llmNote || '未配置 DEEPSEEK_API_KEY，当前为演示数据。') +
+      ' 可用搜索渠道：' +
+      escapeHtml((h.channels || []).filter(c => c.configured).map(c => c.name).join(', ') || '无') +
+      '；情报线：' + (h.intelCron ? '本地兜底已启用' : '未启用') + '。</div>';
+  }
+  loadCorrections();
+}
+
+document.getElementById('image').addEventListener('change', e => {
+    const fl = e.target.files;
+    document.getElementById('file-label').textContent = fl.length
+      ? '📎 ' + fl.length + ' 張圖（' + Array.from(fl).map(f => f.name).join('、').slice(0, 40) + '）'
+      : '📎 添加图片（可选，最多 4 张）';
+  });
+
+document.getElementById('generate').addEventListener('click', async () => {
+  const text = $('#text').value;
+  const file = $('#image').files[0];
+  const fd = new FormData();
+  fd.append('text', text);
+  if (file) fd.append('image', file);
+
+  previewEl.innerHTML = '<div class="scene-tag">生成中…</div>';
+  qEl.style.display = 'none';
+
+  const data = await callApi('/api/generate', { method: 'POST', body: fd });
+
+  if (data.unauthorized) { showGate('登录已失效，请重新输入邀请码'); return; }
+  if (data.needsMore) { renderQuestions(data); previewEl.innerHTML = ''; return; }
+  if (!data.ok) {
+    previewEl.innerHTML = '<div class="err-hint"><b>生成失败：</b>' + escapeHtml(data.error || '未知错误') + '</div>';
+    return;
+  }
+  if (!data.versions || !data.versions.length) {
+    previewEl.innerHTML = '<div class="err-hint">未获得任何版本，请重试。</div>';
+    return;
+  }
+  renderVersions(data);
+});
+
+// ---------- 独立纠错表单 ----------
+document.getElementById('c-submit').addEventListener('click', async () => {
+  const original = $('#c-original').value.trim();
+  const corrected = $('#c-corrected').value.trim();
+  const type = $('#c-type').value;
+  if (!original || !corrected) return alert('请填写原文与纠正后');
+  const r = await callApi('/api/correction', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ original, corrected, type, scene: 'generic' })
+  });
+  if (r.unauthorized) { showGate(); return; }
+  if (!r.ok) return alert('入库失败：' + (r.error || '未知错误'));
+  $('#c-original').value = '';
+  $('#c-corrected').value = '';
+  loadCorrections();
+});
+
+async function loadCorrections() {
+  const data = await callApi('/api/corrections');
+  if (data.unauthorized) { showGate(); return; }
+  const items = (data.items || []).slice(0, 5);
+  $('#c-list').innerHTML = items.length
+    ? '已入库：' + items.map(i =>
+        '[' + escapeHtml(i.type) + '] ' + escapeHtml(i.original) + ' → ' + escapeHtml(i.corrected)
+      ).join('；')
+    : '暂无纠错记录';
+}
+
+// ---------- 历史记录（D-3：历史存每次生成记录）----------
+let historyLoaded = false;
+document.getElementById('history-toggle').addEventListener('click', async () => {
+  const list = $('#history-list');
+  const willShow = list.style.display === 'none';
+  list.style.display = willShow ? 'block' : 'none';
+  document.getElementById('history-toggle').textContent = 'HISTORY · 生成历史 ' + (willShow ? '▾' : '▸');
+  if (willShow && !historyLoaded) {
+    historyLoaded = true;
+    const data = await callApi('/api/history');
+    if (data.unauthorized) { showGate(); return; }
+    const sceneName = { business: '業務', car: '車源', greeting: '早安', festival: '節日', edu: '科普', daily: '日常', unknown: '通用' };
+    const items = data.items || [];
+    list.innerHTML = items.length
+      ? items.slice(0, 10).map(h => {
+          const head = '<div style="margin:10px 0 4px;color:#999;font-size:11px">' +
+            escapeHtml((h.at || '').replace('T', ' ').slice(0, 16)) + ' · ' +
+            escapeHtml(sceneName[h.scene] || h.scene) + ' · 輸入：' + escapeHtml((h.text || '(仅图)').slice(0, 30)) + '</div>';
+          const vs = (h.versions || []).map((v, i) => {
+            const sc = (v.score != null ? ' · ' + v.score + '分' : '') + (v.pass ? '' : ' · ✗未過');
+            return '<div style="padding:6px 10px;margin:4px 0;background:#f8f7f2;border-radius:4px;white-space:pre-wrap">' +
+              '<span style="color:#bbb;font-size:11px">V' + (i + 1) + ' ' + escapeHtml(v.angle || '') + sc + '</span>\n' +
+              escapeHtml((v.text || '').slice(0, 120)) + ((v.text || '').length > 120 ? '…' : '') + '</div>';
+          }).join('');
+          return head + vs;
+        }).join('')
+      : '暂无生成记录';
+  }
+});
+
+// ---------- 情报线浏览（M3：谈资素材入口，永不自动发布）----------
+let intelLoaded = false;
+document.getElementById('intel-toggle').addEventListener('click', async () => {
+  const list = $('#intel-list');
+  const willShow = list.style.display === 'none';
+  list.style.display = willShow ? 'block' : 'none';
+  document.getElementById('intel-toggle').textContent = 'INTEL · 情报线（谈资素材，永不自动发布） ' + (willShow ? '▾' : '▸');
+  if (willShow && !intelLoaded) {
+    intelLoaded = true;
+    const list = $('#intel-list');
+    // 推送通道状态（可观测性：外部 Agent 有没有在推、最近一次何时）
+    const st = await callApi('/api/intel/stats');
+    if (st.unauthorized) { showGate(); return; }
+    const statusHtml = st.ok
+      ? '<div style="margin-bottom:10px;padding:8px 10px;background:#f0efe9;border-radius:4px;font-size:12px;color:#666">' +
+        '推送通道：' + (st.pushEnabled ? '<span style="color:var(--pass)">已啟用</span>' : '<span style="color:var(--warn)">未啟用</span>（未設 INTEL_PUSH_TOKEN）') +
+        ' · 歸檔 <b>' + (st.total || 0) + '</b> 條（多源核實 ' + (st.verified || 0) + '）' +
+        ' · 最近推送：' + (st.lastPushAt
+          ? escapeHtml(String(st.lastPushAt).replace('T', ' ').slice(0, 16)) + ' via ' + escapeHtml(st.lastPushSource || '?')
+          : '尚無 —— 檢查外部 Agent 是否已按 docs/情报推送对接说明.md 對接') +
+        '</div>'
+      : '';
+    const data = await callApi('/api/intel/items?limit=20');
+    if (data.unauthorized) { showGate(); return; }
+    const items = data.items || [];
+    list.innerHTML = statusHtml + (items.length
+      ? items.map(it => {
+          const verified = it.verified ? '<span style="color:var(--pass)">✓ 多源核實</span>' : '<span style="color:#bbb">單源待核</span>';
+          return '<div style="padding:8px 10px;margin:6px 0;background:#f8f7f2;border-radius:4px">' +
+            '<div>' + verified + ' · ' + escapeHtml((it.publishedAt || it.ingestedAt || '').slice(0, 10)) + ' · ' + escapeHtml(it.host || '') + '</div>' +
+            '<a href="' + escapeHtml(it.url) + '" target="_blank" rel="noopener" style="color:var(--accent)">' + escapeHtml(it.title) + '</a>' +
+            (it.snippet ? '<div style="color:#888;font-size:12px">' + escapeHtml(it.snippet.slice(0, 100)) + '</div>' : '') +
+            '</div>';
+        }).join('')
+      : '暂无归档资讯（需外部 Agent 推送或启用本地搜索）';
+  }
+});
+
+// 首屏：先试探鉴权
+(async function init() {
+  const probe = await callApi('/api/corrections');
+  if (probe.unauthorized) { showGate(); return; }
+  boot();
+})();
+</script>
+</body>
+</html>

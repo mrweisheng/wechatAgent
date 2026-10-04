@@ -1,0 +1,9 @@
+node_modules/
+.env
+data/
+_TRASH_*
+*.log
+.DS_Store
+uploads/
+.npm-cache/_patch_*.mjs
+_e2e_*.mjs

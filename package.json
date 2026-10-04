@@ -1,0 +1,22 @@
+{
+  "name": "minge-zhonggangpai-agent",
+  "version": "0.1.0",
+  "private": true,
+  "description": "明哥中港牌 朋友圈文案生成 Agent（MVP）",
+  "type": "module",
+  "main": "server/src/index.js",
+  "scripts": {
+    "start": "node server/src/index.js",
+    "dev": "node --watch server/src/index.js",
+    "test": "node --test server/src/qa/*.test.js server/src/perception/*.test.js server/src/generation/*.test.js server/src/memory/*.test.js server/src/llm/*.test.js server/src/ingest/*.test.js server/src/knowledge/*.test.js"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "express": "^4.19.2",
+    "multer": "^1.4.5-lts.1",
+    "dotenv": "^16.4.5",
+    "node-schedule": "^2.1.1"
+  }
+}
