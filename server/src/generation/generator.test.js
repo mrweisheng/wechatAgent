@@ -60,15 +60,18 @@ test('tone 正确回填', () => {
   assert.deepEqual(r.versions.map(v => v.tone), TONES);
 });
 
-test('imagePlan 与 sceneNotes 正确抽离', () => {
+test('sceneNotes 正确抽离；IMAGE_PLAN 已废弃（剥离正文、不再返回）', () => {
+  // 【2026-10-05 明哥澄清】配图 = 用户自己上传的图，配图指引整体移除。
+  // 模型若仍输出 IMAGE_PLAN，须被剥离、不进正文、也不回落默认模板。
   const r = parseOutput(`${V1}\n\n---\n${V2}\n\n---\n${V3}${TAIL}`, ANGLES, TONES, 'car');
-  assert.match(r.imagePlan, /拍車頭/);
   assert.match(r.sceneNotes, /因為交車/);
+  assert.equal(r.imagePlan, undefined);
+  assert.ok(!JSON.stringify(r.versions).includes('拍車頭'), 'IMAGE_PLAN 内容不得混入版本正文');
 });
 
-test('缺失 imagePlan 时回落到场景默认', () => {
+test('缺失 SCENE_NOTES 时为空串，不影响版本', () => {
   const r = parseOutput(`${V1}\n\n---\n${V2}\n\n---\n${V3}`, ANGLES, TONES, 'car');
-  assert.ok(r.imagePlan.includes('配圖'), '应回落到 IMAGE_DIRECTIONS 默认值');
+  assert.equal(r.sceneNotes, '');
 });
 
 // Best-of-N：6 版候选时按 maxVersions 完整保留，角度/语气组合正确

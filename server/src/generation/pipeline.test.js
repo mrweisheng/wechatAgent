@@ -20,7 +20,7 @@ function fakeIo({ versionsTexts, rewriteResults, scores, sims }) {
   return {
     generate: async () => ({
       versions: versionsTexts.map((t, i) => ({ text: t, angle: ANGLES[i % ANGLES.length], tone: '沉穩質感' })),
-      imagePlan: '【配圖 1】現場實拍', sceneNotes: 'test'
+      sceneNotes: 'test'
     }),
     rewrite: async () => {
       const r = rewriteResults[Math.min(rewriteCalls, rewriteResults.length - 1)];
@@ -36,7 +36,7 @@ function fakeIo({ versionsTexts, rewriteResults, scores, sims }) {
 
 test('硬规则违规触发重写，改好则采纳', async () => {
   const GOOD2 = '驗車完成，冇問題。\n\n#明哥中港牌';
-  const FIX = '蓮塘搞掂，流程安穩。\n\n#明哥中港牌';
+  const FIX = '搞掂晒，流程安穩。\n\n#明哥中港牌'; // 口岸属关键事实，无来源不得出现（r-port-unverified）
   const io = fakeIo({
     versionsTexts: [GOOD, BAD_NUM, GOOD2],
     rewriteResults: [FIX], // 重写修掉数字（且与同批版本互异）
@@ -44,9 +44,10 @@ test('硬规则违规触发重写，改好则采纳', async () => {
     sims: { sim: 0, sample: '' }
   });
   const out = await runPipeline({ text: '選號完成', scene: 'business', angles: ANGLES }, io);
-  assert.equal(out.versions[1].text, FIX);
-  assert.equal(out.versions[1].rewrites, 1);
-  assert.equal(out.versions[1].hardCheck.pass, true);
+  const fixed = out.versions.find(v => v.text === FIX);
+  assert.ok(fixed, '重写稿应入选');
+  assert.equal(fixed.rewrites, 1);
+  assert.equal(fixed.hardCheck.pass, true);
 });
 
 test('低分（<70）触发重写，改差则弃用保留原稿', async () => {
@@ -110,7 +111,7 @@ test('demo 模式（未配置 key）：不做评分与重写', async () => {
   io.generate = async () => ({
     demo: true,
     versions: versionsTextsOf(GOOD),
-    imagePlan: 'x', sceneNotes: 'y'
+    sceneNotes: 'y'
   });
   function versionsTextsOf(t) { return [0, 1, 2].map(i => ({ text: t, angle: ANGLES[i], tone: '沉穩質感' })); }
   const out = await runPipeline({ text: '收工', scene: 'daily', angles: ANGLES }, io);
@@ -134,7 +135,7 @@ test('全部达标时不触发任何重写', async () => {
 test('照抄 §10 风格样本会被判雷同并触发重写（few-shot 防护）', async () => {
   const { STYLE_EXEMPLARS } = await import('../knowledge/corpus.js');
   const COPIED = STYLE_EXEMPLARS.business[0]; // 模型直接照抄官方示例
-  const FRESH = '蓮塘搞掂。\n\n今日不多講。\n\n#明哥中港牌';
+  const FRESH = '搞掂晒。\n\n今日不多講。\n\n#明哥中港牌';
   const io = fakeIo({
     versionsTexts: [COPIED, GOOD, GOOD],
     rewriteResults: [FRESH],
@@ -142,9 +143,11 @@ test('照抄 §10 风格样本会被判雷同并触发重写（few-shot 防护�
     sims: { sim: 0, sample: '' } // 历史为空，仅靠样本比对命中
   });
   const out = await runPipeline({ text: '選號完成', scene: 'business', angles: ANGLES }, io);
-  assert.equal(out.versions[0].rewrites, 1, '照抄样本应触发重写');
-  assert.notEqual(out.versions[0].text, COPIED, '不应保留照抄稿');
-  assert.ok(out.versions[0].similarity < 0.6, '重写后应脱离雷同区间');
+  const fresh = out.versions.find(v => v.text === FRESH);
+  assert.ok(fresh, '重写稿应入选');
+  assert.equal(fresh.rewrites, 1, '照抄样本应触发重写');
+  assert.ok(!out.versions.some(v => v.text === COPIED), '不应保留照抄稿');
+  assert.ok(fresh.similarity < 0.6, '重写后应脱离雷同区间');
 });
 
 test('语气资产库样本传入生成与重写（few-shot），并纳入防照抄', async () => {
@@ -203,8 +206,9 @@ test('Best-of-N：同角度两个语气候选，取软评分更高者', async ()
 });
 
 test('Best-of-N：解析不足时不硬凑（如实返回少量版本）', async () => {
+  const GOOD2 = '驗車完成，冇問題。\n\n#明哥中港牌';
   const io = fakeIo({
-    versionsTexts: [GOOD, GOOD], // LLM 只出了 2 版
+    versionsTexts: [GOOD, GOOD2], // LLM 只出了 2 版（且互不相同）
     rewriteResults: [GOOD],
     scores: { total: 80, premium: 80, novelty: 80, tone: 80, skipped: false },
     sims: { sim: 0, sample: '' }
@@ -213,43 +217,69 @@ test('Best-of-N：解析不足时不硬凑（如实返回少量版本）', async
   assert.equal(out.versions.length, 2, '不足 3 版如实返回，不静默复制');
 });
 
-// 【2026-10-04 明哥澄清】三版 = 同一内容三种写法（多账号防折叠）：
-// 筛选必须保证三版彼此写法差异足够（两两相似度 < 0.45），相似候选只留最高分
-test('防折叠筛选：高度相似的两个候选只留一个，另一版由差异候选补位', async () => {
-  const A = '蓮塘嗰單，今日成交，逐項傾清楚，簽好合同。#明哥中港牌';
-  const A2 = '蓮塘嗰單今日成交，逐項傾清楚，合同簽好。#明哥中港牌'; // 与 A 换词级相似
+// 【2026-10-05 明哥澄清】微信折叠只在「完全相同」时发生，稍有不同即可并存。
+// 默认阈值放宽到 0.9：只拦几乎一模一样，换词级相似不再强制去重。
+test('防折叠（默认宽松）：完全相同的候选只留一个', async () => {
+  const P = '蓮塘嗰單，今日成交，逐項傾清楚，簽好合同。#明哥中港牌';
   const B = '驗車完成，冇問題三個字最抵聽。#明哥中港牌';
   const C = '大橋口岸今日通關順利，新一批搞掂。#明哥中港牌';
   const io = fakeIo({
-    versionsTexts: [A, A2, B, C, GOOD, GOOD],
+    versionsTexts: [P, P, B, C, GOOD, GOOD],
     rewriteResults: [GOOD],
     scores: { total: 80, premium: 80, novelty: 80, tone: 80, skipped: false },
     sims: { sim: 0, sample: '' }
   });
   const out = await runPipeline({ text: '蓮塘搞掂', scene: 'business', angles: ['直述寫法', '觀點寫法', '白描寫法'] }, io);
-  assert.equal(out.versions.length, 3);
   const texts = out.versions.map(v => v.text);
-  assert.ok(!(texts.includes(A) && texts.includes(A2)), 'A 与 A2 换词级相似，不能同时入选（会被微信折叠）');
-  // 两两相似度全部低于阈值
-  for (let i = 0; i < texts.length; i++) {
-    for (let j = i + 1; j < texts.length; j++) {
-      const sim = (await import('../memory/store.js')).textSimilarity(texts[i], texts[j]);
-      assert.ok(sim < 0.45, `第${i + 1}/${j + 1}版相似度 ${sim} 应 < 0.45`);
-    }
-  }
+  assert.equal(texts.filter(t => t === P).length, 1, '完全相同的两版只能留一个');
 });
 
-// 【2026-10-04 祝福复读修正】收尾句两两不得雷同（管重复，不管句式）
-test('收尾句互异：三版结尾相同的候选不能同时入选', async () => {
-  const mk = body => body + '\n\n祝往來中港，一路暢順。\n\n#明哥中港牌';
+test('防折叠（默认宽松）：稍有不同即可并存', async () => {
+  // 落款须单独成行（r-signature-alone），桩文案不能把落款写在正文行尾
+  const A = '蓮塘嗰單，今日成交，逐項傾清楚，簽好合同。\n\n#明哥中港牌';
+  const A2 = '蓮塘嗰單今日成交，逐項傾清楚，合同簽好。\n\n#明哥中港牌'; // 换词级相似
+  const B = '驗車完成，冇問題三個字最抵聽。\n\n#明哥中港牌';
   const io = fakeIo({
-    versionsTexts: [mk('蓮塘搞掂。'), mk('驗車完成。'), mk('大橋通關。'), '深圳灣又落一單。\n\n#明哥中港牌', '交車順利。\n\n#明哥中港牌', '選號完成。\n\n#明哥中港牌'],
-    rewriteResults: ['搞掂。\n\n#明哥中港牌'],
+    versionsTexts: [A, A2, B, GOOD, GOOD, GOOD],
+    rewriteResults: [GOOD],
     scores: { total: 80, premium: 80, novelty: 80, tone: 80, skipped: false },
     sims: { sim: 0, sample: '' }
   });
-  const out = await runPipeline({ text: '搞掂', scene: 'business', angles: ANGLES }, io);
-  const endings = out.versions.map(v => v.text.trim().split('\n').filter(l => l.trim() && !/#明哥中港牌/.test(l)).pop());
-  const dup = endings.some((e, i) => endings.indexOf(e) !== i);
-  assert.equal(dup, false, '三版收尾句不得重复：' + endings.join(' | '));
+  const out = await runPipeline({ text: '蓮塘搞掂', scene: 'business', angles: ['直述寫法', '觀點寫法', '白描寫法'] }, io);
+  const texts = out.versions.map(v => v.text);
+  assert.ok(texts.includes(A) && texts.includes(A2), '换词级相似的两版应可并存（不再强制去重）');
+});
+
+// 【2026-10-05 明哥澄清】三版 = 轻微改写，收尾相同不再互斥；只拦「几乎完全相同」
+test('轻微改写口径：收尾相同、正文措辞不同的候选可同时入选', async () => {
+  const END = '\n\n祝往來中港，一路暢順。\n\n#明哥中港牌';
+  const A = '今日順利交收。' + END;
+  const B = '今日搞掂交收。' + END;
+  const C = '今日辦妥交收。' + END;
+  const io = fakeIo({
+    versionsTexts: [A, B, C, GOOD, GOOD, GOOD],
+    rewriteResults: [GOOD],
+    scores: { total: 80, premium: 80, novelty: 80, tone: 80, skipped: false },
+    sims: { sim: 0, sample: '' }
+  });
+  const out = await runPipeline({ text: '今日順利交收', scene: 'business', angles: ANGLES }, io);
+  assert.equal(out.versions.length, 3);
+  assert.deepEqual(
+    [...out.versions.map(v => v.text)].sort(),
+    [A, B, C].sort(),
+    '三版收尾相同、仅措辞不同，应全部入选'
+  );
+});
+
+test('轻微改写口径：几乎完全相同的候选仍只留一个（防三账号同发折叠）', async () => {
+  const P = '蓮塘嗰單，今日成交，逐項傾清楚，簽好合同。\n\n#明哥中港牌';
+  const io = fakeIo({
+    versionsTexts: [P, P, GOOD, GOOD, GOOD, GOOD],
+    rewriteResults: [GOOD],
+    scores: { total: 80, premium: 80, novelty: 80, tone: 80, skipped: false },
+    sims: { sim: 0, sample: '' }
+  });
+  const out = await runPipeline({ text: '蓮塘搞掂', scene: 'business', angles: ANGLES }, io);
+  const texts = out.versions.map(v => v.text);
+  assert.equal(texts.filter(t => t === P).length, 1, '完全相同的两版只能留一个');
 });

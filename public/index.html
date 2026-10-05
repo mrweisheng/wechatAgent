@@ -60,6 +60,18 @@
     background: transparent;
     color: var(--fg);
   }
+  .input-card.drop-active {
+    border-color: var(--accent);
+    outline: 2px dashed var(--accent);
+    outline-offset: -6px;
+  }
+  .img-hint {
+    margin-top: 8px;
+    font-size: 12px;
+    color: #999;
+    cursor: pointer;
+  }
+  .img-hint:hover { color: var(--warn); }
   .input-row {
     display: flex;
     justify-content: space-between;
@@ -221,27 +233,6 @@
     border-radius: 4px;
     margin-top: 8px;
   }
-  .gate {
-    max-width: 380px;
-    margin: 80px auto;
-    background: var(--card);
-    border: 1px solid var(--line);
-    border-radius: 4px;
-    padding: 28px;
-    text-align: center;
-  }
-  .gate h2 { margin: 0 0 6px; font-size: 15px; font-weight: 500; }
-  .gate p { margin: 0 0 18px; font-size: 12px; color: #999; }
-  .gate input {
-    width: 100%;
-    border: 1px solid var(--line);
-    border-radius: 4px;
-    padding: 9px 12px;
-    font-size: 14px;
-    font-family: inherit;
-    margin-bottom: 12px;
-    box-sizing: border-box;
-  }
   .copy-blocked { opacity: .5; }
   .corrections {
     margin-top: 32px;
@@ -270,19 +261,20 @@
 <body>
 <header>
   <h1>明哥中港牌 · 朋友圈 Agent</h1>
-  <div class="sub">输入文字、上传图片，Agent 输出三版文案 + 配图建议</div>
+  <div class="sub">输入文字、上传图片（配图就用你上传的图），Agent 输出三版文案</div>
 </header>
 <main>
  <div id="app">
-  <div class="input-card">
-    <textarea id="text" placeholder="例：今日收工帶隊去深圳食飯 / 交咗部40系埃爾法畀陳生 / 寫個中秋文案"></textarea>
+  <div class="input-card" id="dropzone">
+    <textarea id="text" placeholder="例：今日收工帶隊去深圳食飯 / 交咗部40系埃爾法畀陳生 / 寫個中秋文案（图片可拖拽或直接粘贴）"></textarea>
     <div class="input-row">
       <label for="image">
-        <span id="file-label">📎 添加图片（可选）</span>
+        <span id="file-label">📎 添加图片（可选，可拖拽/粘贴）</span>
         <input type="file" id="image" accept="image/*" multiple>
       </label>
       <button id="generate">生成三版</button>
     </div>
+    <div id="img-hint" class="img-hint" style="display:none"></div>
   </div>
 
   <div id="questions" style="display:none"></div>
@@ -318,23 +310,18 @@
 
 <script>
 // =====================================================================
-// 前端逻辑
-// 修复点（对照审核）：
-//  1. 补登录 UI —— 原先 inviteToken 只读不写，配了邀请码后整个应用不可用
-//  2. 401 统一处理 —— 原先无分支，data.versions.map 遇 undefined 直接 TypeError 白屏
-//  3. 显示后端 error —— 原先 LLM 失败返回 200+假文案，界面无任何提示
-//  4. XSS —— angle/tone/violation msg 此前未转义直接进 innerHTML
-//  5. pass=false 时禁用复制 —— 原先违规文案照样能一键复制
-//  6. c-type 取真实下拉值 —— 原先硬编码 '风格'，用户选择被丢弃
-//  7. 健康检查走 callApi 并 catch —— 原先裸 fetch 无鉴权头，401 后 r.json() 抛异常
+// 前端逻辑（2026-10-05：移除邀请码鉴权，接口全部公开）
+// 保留的修复点（对照审核）：
+//  1. 401 之外的网络/非 JSON 错误统一走 callApi，避免 data.versions.map 遇 undefined 白屏
+//  2. 显示后端 error —— 原先 LLM 失败返回 200+假文案，界面无任何提示
+//  3. XSS —— angle/tone/violation msg 此前未转义直接进 innerHTML
+//  4. pass=false 时禁用复制 —— 原先违规文案照样能一键复制
+//  5. c-type 取真实下拉值 —— 原先硬编码 '风格'，用户选择被丢弃
+//  6. 健康检查走 callApi 并 catch
 // =====================================================================
 const $ = (s) => document.querySelector(s);
 const previewEl = $('#preview');
 const qEl = $('#questions');
-const appEl = $('#app');
-
-let inviteToken = localStorage.getItem('invite') || '';
-let authRequired = false;
 
 function escapeHtml(s) {
   return String(s == null ? '' : s).replace(/[&<>"']/g, c =>
@@ -363,11 +350,9 @@ function copyText(t) {
 }
 
 async function callApi(path, opts = {}) {
-  const headers = Object.assign({}, opts.headers || {});
-  if (inviteToken) headers['x-invite-code'] = inviteToken;
   let r;
   try {
-    r = await fetch(path, Object.assign({}, opts, { headers }));
+    r = await fetch(path, opts);
   } catch (e) {
     return { ok: false, error: '无法连接服务器，请确认服务已启动', network: true };
   }
@@ -377,55 +362,8 @@ async function callApi(path, opts = {}) {
   } catch {
     return { ok: false, error: '服务器返回了非 JSON 响应（HTTP ' + r.status + '）' };
   }
-  if (r.status === 401) {
-    inviteToken = '';
-    localStorage.removeItem('invite');
-    return { ok: false, error: '未授权，请重新输入邀请码', unauthorized: true };
-  }
   if (!r.ok && data.ok !== false) data.ok = false;
   return data;
-}
-
-// ---------- 登录闸门 ----------
-function showGate(message) {
-  appEl.style.display = 'none';
-  let gate = $('#gate');
-  if (!gate) {
-    gate = document.createElement('div');
-    gate.id = 'gate';
-    gate.className = 'gate';
-    document.querySelector('main').prepend(gate);
-  }
-  gate.innerHTML = `
-    <h2>明哥中港牌 · 朋友圈 Agent</h2>
-    <p>${escapeHtml(message || '请输入邀请码')}</p>
-    <input id="gate-code" type="password" placeholder="邀请码" autocomplete="current-password">
-    <button id="gate-btn" style="width:100%">进入</button>
-    <div id="gate-err" class="err-hint" style="display:none"></div>
-  `;
-  const submit = async () => {
-    const code = $('#gate-code').value.trim();
-    if (!code) return;
-    const r = await callApi('/api/login', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ code })
-    });
-    if (r.ok) {
-      inviteToken = r.token;
-      localStorage.setItem('invite', r.token);
-      gate.remove();
-      appEl.style.display = '';
-      boot();
-    } else {
-      const e = $('#gate-err');
-      e.style.display = 'block';
-      e.textContent = r.error || '邀请码错误';
-    }
-  };
-  $('#gate-btn').onclick = submit;
-  $('#gate-code').onkeydown = e => { if (e.key === 'Enter') submit(); };
-  $('#gate-code').focus();
 }
 
 // ---------- 渲染：三版文案 ----------
@@ -447,6 +385,9 @@ function renderVersions(data) {
   }
   if (data.warning) {
     banners.push('<div class="warn-hint">⚠️ ' + escapeHtml(data.warning) + '</div>');
+  }
+  if (data.maskReminder) {
+    banners.push('<div class="warn-hint">⚠️ 你上传的截图含头像/昵称/电话/车牌等隐私信息，<b>发布前请先打码</b>。</div>');
   }
   if (data.degraded && !data.warning) {
     const reasonMap = {
@@ -517,7 +458,6 @@ function renderVersions(data) {
     ${banners.join('')}
     <div class="scene-tag">場景 · ${escapeHtml(sceneName)}${data.candidates > (data.versions || []).length ? ' ｜ 已從 ' + data.candidates + ' 個候選中篩出最優 ' + (data.versions || []).length + ' 版' : ''}</div>
     <div class="versions">${versionsHtml}</div>
-    ${data.imagePlan ? '<div class="image-plan"><b>配圖指引</b>' + escapeHtml(data.imagePlan) + '</div>' : ''}
     ${data.sceneNotes ? '<div class="image-plan" style="margin-top:8px"><b>寫作理由</b>' + escapeHtml(data.sceneNotes) + '</div>' : ''}
   `;
 
@@ -525,7 +465,10 @@ function renderVersions(data) {
     b.onclick = () => {
       const i = +b.dataset.copy;
       copyText(data.versions[i].text)
-        .then(() => { b.textContent = '已複製 ✓'; })
+        .then(() => {
+          b.textContent = '已複製 ✓';
+          setTimeout(() => { b.textContent = '複製文案'; }, 2000);
+        })
         .catch(() => {
           b.textContent = '複製失敗，請手動選擇正文複製';
           setTimeout(() => { b.textContent = '複製文案'; }, 2500);
@@ -552,6 +495,7 @@ function renderVersions(data) {
         })
       });
       b.textContent = r.ok ? '已記錄 ✓' : '記錄失敗';
+      if (r.ok) b.disabled = true; // 已选中过，防重复上报
     };
   });
 
@@ -569,11 +513,12 @@ function renderVersions(data) {
       const edited = box.querySelector('textarea').value;
       const type = box.querySelector('.corr-type').value;
       if (!edited.trim()) { alert('请先修改文案'); return; }
-      await callApi('/api/feedback', {
+      const fr = await callApi('/api/feedback', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ kind: 'edit', payload: { scene: data.scene, index: i, edited } })
       });
+      if (!fr.ok) { b.textContent = '反饋上報失敗，未入庫'; return; }
       const r = await callApi('/api/correction', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -596,14 +541,19 @@ function renderQuestions(data) {
     <div class="questions">
       <b>已理解：${escapeHtml(data.understood || '(无)')}（場景：${escapeHtml(data.scene)}）</b>
       還需補充：${(data.questions || []).map(q => escapeHtml(q)).join('；')}
+      <div style="margin-top:6px;color:#8a6d3b">请直接在上方输入框补充上述信息（原内容保留），再点「生成三版」。</div>
     </div>`;
 }
 
 // ---------- 启动 ----------
 async function boot() {
   const h = await callApi('/api/health');
-  if (h.unauthorized) { showGate(); return; }
-  if (!h.ok) return;
+  if (!h.ok) {
+    // 健康检查失败不再静默——否则用户直到生成才发现服务不可用
+    previewEl.innerHTML = '<div class="err-hint"><b>服务健康检查失败：</b>' +
+      escapeHtml(h.error || '请确认服务已启动') + '</div>';
+    return;
+  }
 
   if (!h.llm) {
     previewEl.innerHTML = '<div class="demo-hint">⚠️ ' +
@@ -615,59 +565,152 @@ async function boot() {
   loadCorrections();
 }
 
+// ---------- 图片输入：文件选择 / 拖拽 / 粘贴 统一收集（最多 4 张）----------
+const MAX_FILES = 4;
+let selectedFiles = [];
+const fileLabel = $('#file-label');
+const imgHint = $('#img-hint');
+
+function refreshFileLabel() {
+  fileLabel.textContent = selectedFiles.length
+    ? '📎 ' + selectedFiles.length + ' 张图（' + selectedFiles.map(f => f.name || '剪贴板图片').join('、').slice(0, 40) + '）'
+    : '📎 添加图片（可选，可拖拽/粘贴）';
+  imgHint.style.display = selectedFiles.length ? 'block' : 'none';
+  imgHint.textContent = selectedFiles.length ? '已选 ' + selectedFiles.length + '/' + MAX_FILES + ' 张 —— 点击清除' : '';
+}
+
+// 文件预检：1 张超大图不该让整批上传 413 报废；非图片（拖拽 .exe/.zip 常无 type）提前拦截
+const MAX_SIZE = 5 * 1024 * 1024;
+let fileWarnTimer = null;
+function flashFileWarn(msg) {
+  imgHint.style.display = 'block';
+  imgHint.textContent = msg;
+  clearTimeout(fileWarnTimer);
+  fileWarnTimer = setTimeout(refreshFileLabel, 5000);
+}
+
+function addFiles(list) {
+  const warns = [];
+  for (const f of Array.from(list || [])) {
+    if (!f) continue;
+    const isImg = (f.type && f.type.startsWith('image/')) ||
+      /\.(jpe?g|png|webp|gif|heic|heif|avif)$/i.test(f.name || '');
+    if (!isImg) { warns.push('已跳过非图片文件：' + (f.name || '未知')); continue; }
+    if (f.size > MAX_SIZE) { warns.push('「' + (f.name || '图片') + '」超过 5MB，请压缩后再试'); continue; }
+    if (selectedFiles.length >= MAX_FILES) { warns.push('最多 ' + MAX_FILES + ' 张图'); break; }
+    const dup = selectedFiles.some(x => x.name === f.name && x.size === f.size && x.lastModified === f.lastModified);
+    if (!dup) selectedFiles.push(f);
+  }
+  refreshFileLabel();
+  if (warns.length) flashFileWarn(warns.slice(0, 2).join('；'));
+}
+
+imgHint.onclick = () => { selectedFiles = []; refreshFileLabel(); };
+
 document.getElementById('image').addEventListener('change', e => {
-    const fl = e.target.files;
-    document.getElementById('file-label').textContent = fl.length
-      ? '📎 ' + fl.length + ' 張圖（' + Array.from(fl).map(f => f.name).join('、').slice(0, 40) + '）'
-      : '📎 添加图片（可选，最多 4 张）';
-  });
+  addFiles(e.target.files);
+  e.target.value = ''; // 允许重复选择同一文件
+});
 
-document.getElementById('generate').addEventListener('click', async () => {
-  const text = $('#text').value;
-  const file = $('#image').files[0];
-  const fd = new FormData();
-  fd.append('text', text);
-  if (file) fd.append('image', file);
-
-  previewEl.innerHTML = '<div class="scene-tag">生成中…</div>';
-  qEl.style.display = 'none';
-
-  const data = await callApi('/api/generate', { method: 'POST', body: fd });
-
-  if (data.unauthorized) { showGate('登录已失效，请重新输入邀请码'); return; }
-  if (data.needsMore) { renderQuestions(data); previewEl.innerHTML = ''; return; }
-  if (!data.ok) {
-    previewEl.innerHTML = '<div class="err-hint"><b>生成失败：</b>' + escapeHtml(data.error || '未知错误') + '</div>';
-    return;
+// 粘贴：从剪贴板取图片（Ctrl+V）
+document.addEventListener('paste', e => {
+  const items = e.clipboardData && e.clipboardData.items;
+  if (!items) return;
+  const imgs = [];
+  for (const it of items) {
+    if (it.kind === 'file' && it.type && it.type.startsWith('image/')) {
+      const f = it.getAsFile();
+      if (f) imgs.push(f);
+    }
   }
-  if (!data.versions || !data.versions.length) {
-    previewEl.innerHTML = '<div class="err-hint">未获得任何版本，请重试。</div>';
-    return;
+  if (imgs.length) { addFiles(imgs); e.preventDefault(); }
+});
+
+// 拖拽：把图片拖进输入框
+const dropzone = document.getElementById('dropzone');
+dropzone.addEventListener('dragover', e => { e.preventDefault(); dropzone.classList.add('drop-active'); });
+dropzone.addEventListener('dragleave', e => { if (!dropzone.contains(e.relatedTarget)) dropzone.classList.remove('drop-active'); });
+dropzone.addEventListener('drop', e => {
+  e.preventDefault();
+  dropzone.classList.remove('drop-active');
+  addFiles(e.dataTransfer && e.dataTransfer.files);
+});
+
+refreshFileLabel();
+
+const genBtn = document.getElementById('generate');
+genBtn.addEventListener('click', async () => {
+  if (genBtn.disabled) return; // 防连点：两个并发请求会互相覆盖结果
+  genBtn.disabled = true;
+  genBtn.textContent = '生成中…';
+  try {
+    const text = $('#text').value;
+    // 字段名必须与后端 upload.array('images', 4) 一致；多图全部上传（上限 4 张）
+    // 图片来源：文件选择 / 拖拽 / 粘贴 统一收集在 selectedFiles
+    const files = selectedFiles.slice(0, MAX_FILES);
+    const fd = new FormData();
+    fd.append('text', text);
+    for (const f of files) fd.append('images', f);
+
+    previewEl.innerHTML = '<div class="scene-tag">生成中…</div>';
+    qEl.style.display = 'none';
+
+    const data = await callApi('/api/generate', { method: 'POST', body: fd });
+
+    if (data.needsMore) {
+      // 图片保留：补充信息重试时上传的图仍是素材；生成成功后才清空
+      renderQuestions(data);
+      previewEl.innerHTML = '';
+      return;
+    }
+    if (!data.ok) {
+      previewEl.innerHTML = '<div class="err-hint"><b>生成失败：</b>' + escapeHtml(data.error || '未知错误') + '</div>';
+      return;
+    }
+    if (!data.versions || !data.versions.length) {
+      previewEl.innerHTML = '<div class="err-hint">未获得任何版本，请重试。</div>';
+      return;
+    }
+    renderVersions(data);
+    // 本条朋友圈已完成：清掉已上传图片，避免下次生成误带旧图
+    selectedFiles = [];
+    refreshFileLabel();
+  } finally {
+    genBtn.disabled = false;
+    genBtn.textContent = '生成三版';
   }
-  renderVersions(data);
 });
 
 // ---------- 独立纠错表单 ----------
 document.getElementById('c-submit').addEventListener('click', async () => {
+  const btn = document.getElementById('c-submit');
+  if (btn.disabled) return; // 防双击重复入库
   const original = $('#c-original').value.trim();
   const corrected = $('#c-corrected').value.trim();
   const type = $('#c-type').value;
   if (!original || !corrected) return alert('请填写原文与纠正后');
-  const r = await callApi('/api/correction', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ original, corrected, type, scene: 'generic' })
-  });
-  if (r.unauthorized) { showGate(); return; }
-  if (!r.ok) return alert('入库失败：' + (r.error || '未知错误'));
-  $('#c-original').value = '';
-  $('#c-corrected').value = '';
-  loadCorrections();
+  btn.disabled = true;
+  try {
+    const r = await callApi('/api/correction', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ original, corrected, type, scene: 'generic' })
+    });
+    if (!r.ok) return alert('入库失败：' + (r.error || '未知错误'));
+    $('#c-original').value = '';
+    $('#c-corrected').value = '';
+    loadCorrections();
+  } finally {
+    btn.disabled = false;
+  }
 });
 
 async function loadCorrections() {
   const data = await callApi('/api/corrections');
-  if (data.unauthorized) { showGate(); return; }
+  if (data.ok === false) {
+    $('#c-list').textContent = '纠错记录加载失败：' + (data.error || '未知错误');
+    return;
+  }
   const items = (data.items || []).slice(0, 5);
   $('#c-list').innerHTML = items.length
     ? '已入库：' + items.map(i =>
@@ -684,9 +727,13 @@ document.getElementById('history-toggle').addEventListener('click', async () => 
   list.style.display = willShow ? 'block' : 'none';
   document.getElementById('history-toggle').textContent = 'HISTORY · 生成历史 ' + (willShow ? '▾' : '▸');
   if (willShow && !historyLoaded) {
-    historyLoaded = true;
     const data = await callApi('/api/history');
-    if (data.unauthorized) { showGate(); return; }
+    // 失败不再伪装成「暂无记录」：加载成功才锁定，失败可重试
+    if (!data.ok) {
+      list.innerHTML = '<span style="color:var(--warn)">历史加载失败：' + escapeHtml(data.error || '未知错误') + '（重新展开可重试）</span>';
+      return;
+    }
+    historyLoaded = true;
     const sceneName = { business: '業務', car: '車源', greeting: '早安', festival: '節日', edu: '科普', daily: '日常', unknown: '通用' };
     const items = data.items || [];
     list.innerHTML = items.length
@@ -714,11 +761,9 @@ document.getElementById('intel-toggle').addEventListener('click', async () => {
   list.style.display = willShow ? 'block' : 'none';
   document.getElementById('intel-toggle').textContent = 'INTEL · 情报线（谈资素材，永不自动发布） ' + (willShow ? '▾' : '▸');
   if (willShow && !intelLoaded) {
-    intelLoaded = true;
     const list = $('#intel-list');
     // 推送通道状态（可观测性：外部 Agent 有没有在推、最近一次何时）
     const st = await callApi('/api/intel/stats');
-    if (st.unauthorized) { showGate(); return; }
     const statusHtml = st.ok
       ? '<div style="margin-bottom:10px;padding:8px 10px;background:#f0efe9;border-radius:4px;font-size:12px;color:#666">' +
         '推送通道：' + (st.pushEnabled ? '<span style="color:var(--pass)">已啟用</span>' : '<span style="color:var(--warn)">未啟用</span>（未設 INTEL_PUSH_TOKEN）') +
@@ -729,7 +774,12 @@ document.getElementById('intel-toggle').addEventListener('click', async () => {
         '</div>'
       : '';
     const data = await callApi('/api/intel/items?limit=20');
-    if (data.unauthorized) { showGate(); return; }
+    // 失败不再伪装成「暂无归档资讯」：加载成功才锁定，失败可重试
+    if (!data.ok) {
+      list.innerHTML = statusHtml + '<span style="color:var(--warn)">资讯加载失败：' + escapeHtml(data.error || '未知错误') + '（重新展开可重试）</span>';
+      return;
+    }
+    intelLoaded = true;
     const items = data.items || [];
     list.innerHTML = statusHtml + (items.length
       ? items.map(it => {
@@ -740,16 +790,12 @@ document.getElementById('intel-toggle').addEventListener('click', async () => {
             (it.snippet ? '<div style="color:#888;font-size:12px">' + escapeHtml(it.snippet.slice(0, 100)) + '</div>' : '') +
             '</div>';
         }).join('')
-      : '暂无归档资讯（需外部 Agent 推送或启用本地搜索）';
+      : '暂无归档资讯（需外部 Agent 推送或启用本地搜索）');
   }
 });
 
-// 首屏：先试探鉴权
-(async function init() {
-  const probe = await callApi('/api/corrections');
-  if (probe.unauthorized) { showGate(); return; }
-  boot();
-})();
+// 首屏
+boot();
 </script>
 </body>
 </html>

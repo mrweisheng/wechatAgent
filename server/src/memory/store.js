@@ -37,9 +37,10 @@ async function readJson(file, fallback) {
   }
 }
 
-// 原子写：先写 .tmp 再 rename，避免并发/中断产生半截文件
+// 原子写：先写唯一 .tmp 再 rename，避免并发/中断产生半截文件
+// （tmp 带随机后缀：两个并发写方共享同名 .tmp 会互相覆盖/抢走 rename 源）
 async function writeJson(file, data) {
-  const tmp = file + '.tmp';
+  const tmp = `${file}.tmp-${process.pid}-${Math.random().toString(36).slice(2, 8)}`;
   await fs.writeFile(tmp, JSON.stringify(data, null, 2), 'utf8');
   await fs.rename(tmp, file);
 }

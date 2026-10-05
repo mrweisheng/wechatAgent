@@ -39,6 +39,14 @@ test('价格与车牌里程被拦（繁简双写）', () => {
   assert.ok(V(checkHardRules('只跑了 50,000 公里。\n\n#明哥中港牌')).includes('r-no-numbers'));
 });
 
+// 【回归 2026-10-05 e2e 实测】「由第一通電話」被误报绝对化用语；序数「第一」不应提示
+test('绝对化用语：「第一」作序数不误报，作排名仍提示', () => {
+  const ord = checkHardRules('由第一通電話到交車，同一個人跟到尾。\n\n#明哥中港牌');
+  assert.ok(!W(ord).includes('r-absolute-advisory'), `序数第一不应提示：${W(ord).join(',')}`);
+  const sup = checkHardRules('我哋係行業第一。\n\n#明哥中港牌');
+  assert.ok(W(sup).includes('r-absolute-advisory'), '排名第一仍应提示');
+});
+
 test('微商套话被拦', () => {
   assert.ok(V(checkHardRules('感恩託付，圓滿收官。\n\n#明哥中港牌')).includes('r-cliche'));
 });
@@ -110,23 +118,54 @@ test('r-no-fabricate 拦无依据引号', () => {
   assert.ok(V(r).includes('r-no-fabricate'));
 });
 
-test('r-no-fabricate 有依据则放行', () => {
-  const r = checkHardRules('群裡一句「搞掂」。\n\n#明哥中港牌', { scene: 'business', userText: '群裡一句「搞掂」' });
-  assert.equal(r.pass, true);
+test('r-no-fabricate 有依据则放行（原文 + 群聊截图）', () => {
+  const r = checkHardRules('群裡一句「搞掂」。\n\n#明哥中港牌', {
+    scene: 'business',
+    userText: '群裡一句「搞掂」',
+    vision: { type: 'screenshot', description: '群聊截圖：群裡一句「搞掂」', extracted: { status: '選號完成', hasPII: false } }
+  });
+  assert.equal(r.pass, true, `有依据不应拦截：${V(r).join(',')}`);
 });
 
-test('r-no-fabricate 短口语引用不误伤（§10 官方示例风格）', () => {
-  // 用户只说「選號完成」，文案引用「搞掂」「冇問題」是群聊常规写法，不算虚构
+// 【2026-10-05 明哥反馈收紧】原「≤5 字短引语一律放行」豁免是虚构通道：
+// 没传截图编「群裡一句『搞掂』」、传了截图编「可以行得」，全部免检漏网。
+// 现在：引语不论长短，必须逐字来自用户原文或截图识别结果。
+test('r-no-fabricate 无依据短引语同样拦截（不再豁免）', () => {
   const userText = '今日一對夫婦結伴嚟辦蓮塘，選號完成';
   const samples = [
-    '群裡一句「搞掂」，背後成個流程安安穩穩。\n\n#明哥中港牌',
-    '群裡最平淡嗰三個字——「冇問題」。\n\n#明哥中港牌',
-    '一句「搞掂」。\n\n#明哥中港牌'
+    '一句「搞掂」。\n\n#明哥中港牌',
+    '一句「冇問題」。\n\n#明哥中港牌',
+    '一句「可以行得」。\n\n#明哥中港牌'
   ];
   for (const t of samples) {
     const r = checkHardRules(t, { scene: 'business', userText });
-    assert.ok(!V(r).includes('r-no-fabricate'), `误拦短引用：${t.split('\n')[0]} -> ${V(r).join(',')}`);
+    assert.ok(V(r).includes('r-no-fabricate'), `无依据短引语应拦：${t.split('\n')[0]} -> ${V(r).join(',')}`);
   }
+});
+
+// 【2026-10-05 明哥反馈】两次实测翻车：没传图编「群裡最後一句『可以行得。』」；
+// 传了截图，引的「搞掂」也不是图里原文。群聊内容只能来自真实截图。
+test('r-group-screenshot 没传截图不得提群', () => {
+  const r = checkHardRules('群裡一句「搞掂」。\n\n#明哥中港牌', { scene: 'business', userText: '選號完成' });
+  assert.ok(V(r).includes('r-group-screenshot'), V(r).join(','));
+});
+
+test('r-group-screenshot 传了群聊截图则放行', () => {
+  const r = checkHardRules('群裡幾句話，逐步走完。\n\n#明哥中港牌', {
+    scene: 'business',
+    userText: '選號完成',
+    vision: { type: 'screenshot', description: '群聊截圖，客戶群對話', extracted: { status: '選號完成', hasPII: true } }
+  });
+  assert.ok(!V(r).includes('r-group-screenshot'), V(r).join(','));
+});
+
+test('r-group-screenshot 视觉识别降级（无有效截图）时同样拦截', () => {
+  const r = checkHardRules('群裡幾句話。\n\n#明哥中港牌', {
+    scene: 'business',
+    userText: '選號完成',
+    vision: { type: 'other', description: '(視覺識別未啟用或調用失敗，已跳過圖像理解)', extracted: { hasPII: false }, _degraded: true }
+  });
+  assert.ok(V(r).includes('r-group-screenshot'), V(r).join(','));
 });
 
 test('r-no-fabricate 拦长篇虚构表述（各引号类型）', () => {
@@ -174,19 +213,8 @@ test('r-no-fabricate 全场景生效（不限于 business）', () => {
   assert.ok(V(r).includes('r-no-fabricate'), '虚构红线应与场景无关');
 });
 
-test('r-mask-pii 有PII但未提示打码被拦', () => {
-  const r = checkHardRules('搞掂晒。\n\n#明哥中港牌', {
-    vision: { extracted: { hasPII: true } }, imagePlan: '拍現場圖'
-  });
-  assert.ok(V(r).includes('r-mask-pii'));
-});
-
-test('r-mask-pii 已提示打码放行', () => {
-  const r = checkHardRules('搞掂晒。\n\n#明哥中港牌', {
-    vision: { extracted: { hasPII: true } }, imagePlan: '群聊截圖，發布前打碼頭像暱稱'
-  });
-  assert.equal(r.pass, true);
-});
+// r-mask-pii 已移除（2026-10-05）：配图是用户自己的图，文案层无从替他打码，
+// 改为 API 返回 maskReminder 由前端横幅提示，不再作为文案硬规则。
 
 // ========== 误报回归：正常文案不得被拦 ==========
 test('正常粤语文案不得被误拦', () => {
@@ -215,12 +243,39 @@ test('checked 不得虚报 HARD_RULES 长度', () => {
 
 test('全场景下 checked 如实反映已评估规则', () => {
   const r = checkHardRules('搞掂晒。\n\n#明哥中港牌', {
-    scene: 'greeting', userText: 'x', vision: { type: 'screenshot', description: '客戶群對話', extracted: { hasPII: true } },
-    imagePlan: '打碼'
+    scene: 'greeting', userText: 'x', vision: { type: 'screenshot', description: '客戶群對話', extracted: { hasPII: true } }
   });
-  // greeting 场景下 r-sharedan-completed 不适用，其余应已评估
-  assert.deepEqual(r.unimplemented.sort(), ['r-no-future-time', 'r-port-unverified', 'r-sharedan-completed']);
-  assert.equal(r.checked, r.declared - 3);
+  // greeting 场景下：晒单/未来时间/口岸/交车/到场次数/收尾 等场景规则均不适用，其余应已评估
+  assert.deepEqual(r.unimplemented.sort(), [
+    'r-car-delivery-scope', 'r-low-ending', 'r-no-future-time',
+    'r-port-unverified', 'r-sharedan-completed', 'r-visit-count'
+  ]);
+  assert.equal(r.checked, r.declared - 6);
+});
+
+// 【回归 2026-10-05 明哥业务反馈】纯购车交车帖不得接两地牌后续
+test('r-car-delivery-scope：纯购车交车帖不得接两地牌后续，明确办牌则放行', () => {
+  const bad = checkHardRules('交車。之後仲有裝卡，照流程行。\n\n#明哥中港牌', {
+    scene: 'business', userText: '今日交車，40系埃爾法，客人好滿意'
+  });
+  assert.ok(V(bad).includes('r-car-delivery-scope'), `应拦纯购车接装卡：${V(bad).join(',')}`);
+  const ok = checkHardRules('交車，之後仲有裝卡，照流程行。\n\n#明哥中港牌', {
+    scene: 'business', userText: '幫客戶交車，佢係辦兩地牌嘅，之後仲有裝卡'
+  });
+  assert.ok(!V(ok).includes('r-car-delivery-scope'), '用户明确办两地牌应放行');
+  // 非交车语境（选号完成）不受影响
+  const normal = checkHardRules('選號完成。\n\n#明哥中港牌', { scene: 'business', userText: '選號完成' });
+  assert.ok(!V(normal).includes('r-car-delivery-scope'));
+});
+
+// 【回归 2026-10-05 明哥业务反馈】到场次数 / 低质收尾 / 地理错误三条提示
+test('r-visit-count / r-low-ending / r-geo-hk', () => {
+  const cnt = checkHardRules('客戶出現嘅次數，兩隻手數得晒。\n\n#明哥中港牌', { scene: 'business' });
+  assert.ok(W(cnt).includes('r-visit-count'));
+  const ending = checkHardRules('交車完成。\n\n路上見。\n\n#明哥中港牌', { scene: 'business' });
+  assert.ok(W(ending).includes('r-low-ending'));
+  const geo = checkHardRules('有客從香港過來取車。\n\n#明哥中港牌', { scene: 'business' });
+  assert.ok(W(geo).includes('r-geo-hk'));
 });
 
 test('繁简均接受：不做字体检测（明哥 2026-10-03 确认）', () => {
@@ -256,15 +311,17 @@ test('价格与里程：阿拉伯数字 + 萬 的写法被拦（原先漏网）'
 });
 
 // 【回归 2026-10-04 二轮】导演腔镜头：明哥否决「靜咗幾秒。然後一句：『得。』」（尴尬+脑补）
+// 【2026-10-05】引语新规后，「得」须在 userText 有据才不触发 r-no-fabricate——
+// 本测试只验证 r-drama 是提示级，故把引语补进依据语料
 test('r-drama 导演腔触发提示（warning 不阻断）', () => {
   const cases = [
-    '陳生坐入去，手放喺軚盤上面。靜咗幾秒。然後一句：「得」。\n\n#明哥中港牌',
-    '佢笑住話，就係呢部。\n\n#明哥中港牌',
-    '佢望住我，半晌冇出聲。\n\n#明哥中港牌'
+    ['陳生坐入去，手放喺軚盤上面。靜咗幾秒。然後一句：「得」。\n\n#明哥中港牌', '今日交車，佢一句「得」'],
+    ['佢笑住話，就係呢部。\n\n#明哥中港牌', '今日交車'],
+    ['佢望住我，半晌冇出聲。\n\n#明哥中港牌', '今日交車']
   ];
-  for (const t of cases) {
-    const r = checkHardRules(t, { scene: 'business', userText: '今日交車' });
-    assert.equal(r.pass, true, 'r-drama 是提示级，不应阻断');
+  for (const [t, ut] of cases) {
+    const r = checkHardRules(t, { scene: 'business', userText: ut });
+    assert.equal(r.pass, true, `r-drama 是提示级，不应阻断：${V(r).join(',')}`);
     assert.ok(W(r).includes('r-drama'), `应提示导演腔：${t.slice(0, 12)}`);
   }
 });
@@ -278,8 +335,8 @@ test('r-drama 官方示例的客户动作白描不误伤', () => {
 
 // 【2026-10-04 明哥确认】成交/晒单（business）场景落款可带一个业务标签（双标签）
 test('双标签：business 场景 #明哥中港牌 #蓮塘兩地牌 放行，其他场景仍单落款', () => {
-  // business 双标签放行
-  const okBiz = checkHardRules('今日成交，蓮塘搞掂。\n\n#明哥中港牌 #蓮塘兩地牌', { scene: 'business' });
+  // business 双标签放行（口岸须来自用户输入，见 r-port-unverified）
+  const okBiz = checkHardRules('今日成交，蓮塘搞掂。\n\n#明哥中港牌 #蓮塘兩地牌', { scene: 'business', userText: '蓮塘搞掂' });
   assert.equal(okBiz.pass, true);
   // 单标签在 business 依旧放行
   assert.equal(checkHardRules('搞掂。\n\n#明哥中港牌', { scene: 'business' }).pass, true);
@@ -354,16 +411,43 @@ test('r-no-future-time：无来源的时间承诺被拦，有来源/无时间说
   assert.equal(morning.pass, true);
 });
 
-// 【回归 2026-10-04 e2e 实测】模型从知识库替本次成交「配」口岸（输入无口岸却写蓮塘）
-test('r-port-unverified：口岸无来源提示核实；通用罗列与有来源放行', () => {
-  // 无来源单口岸 → 提示（不阻断）
+// 【回归 2026-10-05】「千萬」作副词（強調否定，如「千萬唔好急」）不应被误判为价格
+test('价格检测：千万副词不误伤，真实金额仍拦', () => {
+  const adv = checkHardRules('呢件事，千萬唔好急。\n\n#明哥中港牌');
+  assert.ok(!V(adv).includes('r-no-numbers'), `千萬唔好 不应判为价格：${V(adv).join(',')}`);
+  const adv2 = checkHardRules('千万要留意。\n\n#明哥中港牌');
+  assert.ok(!V(adv2).includes('r-no-numbers'), '千万要 不应判为价格');
+  const price = checkHardRules('唔使一千萬，幾百萬都有。\n\n#明哥中港牌');
+  assert.ok(V(price).includes('r-no-numbers'), '真实金额仍应拦');
+});
+
+// 【回归 2026-10-05】「學生/醫生/發生」等非称呼词不应被当作客户称呼误拦
+test('r-no-client-name：學生/醫生等非称呼不误拦', () => {
+  const r = checkHardRules('今日有學生嚟問價。\n\n#明哥中港牌', {
+    scene: 'daily', userText: '有客人嚟問價',
+    vision: { type: 'other', description: '一位學生在查詢', extracted: {} }
+  });
+  assert.ok(!V(r).includes('r-no-client-name'), `學生 不应误拦：${V(r).join(',')}`);
+});
+
+// 【回归 2026-10-04 e2e 实测 + 2026-10-05 明哥确认升级】模型会从知识库/风格锚
+// 替本次成交「配」口岸（输入无口岸却写蓮塘）。明哥口径：口岸属关键事实，
+// 无来源 = 阻断（没有明确信息就追问或拦截，绝不自行补）。
+test('r-port-unverified：口岸无来源阻断；通用罗列与有来源放行', () => {
+  // 无来源单口岸 → 违规（阻断，触发重写删去口岸表述）
   const w = checkHardRules('今日成交，蓮塘搞掂。\n\n#明哥中港牌 #蓮塘兩地牌', { scene: 'business', userText: '搞掂' });
-  assert.equal(w.pass, true);
-  assert.ok(W(w).includes('r-port-unverified'), `应提示口岸核实：${W(w).join(',')}`);
-  // 用户输入里有口岸 → 不提示
+  assert.equal(w.pass, false);
+  assert.ok(V(w).includes('r-port-unverified'), `口岸无来源应阻断：${V(w).join(',')}`);
+  // 用户输入里有口岸 → 放行
   const ok = checkHardRules('今日成交，蓮塘搞掂。\n\n#明哥中港牌 #蓮塘兩地牌', { scene: 'business', userText: '蓮塘搞掂' });
-  assert.ok(!W(ok).includes('r-port-unverified'));
-  // 通用罗列多个口岸 → 不提示
+  assert.ok(!V(ok).includes('r-port-unverified'));
+  // 截图识别到的口岸也是证据 → 放行
+  const viaVision = checkHardRules('今日成交，蓮塘搞掂。\n\n#明哥中港牌 #蓮塘兩地牌', {
+    scene: 'business', userText: '搞掂',
+    vision: { type: 'screenshot', description: '群聊截圖：蓮塘選號完成', extracted: { ports: ['蓮塘'], hasPII: false } }
+  });
+  assert.ok(!V(viaVision).includes('r-port-unverified'));
+  // 通用罗列多个口岸 → 不拦（视为介绍）
   const list = checkHardRules('兩地牌可辦：深圳灣、蓮塘、沙頭角、港珠澳大橋，今日又落一單。\n\n#明哥中港牌', { scene: 'business', userText: '又落一單' });
-  assert.ok(!W(list).includes('r-port-unverified'));
+  assert.ok(!V(list).includes('r-port-unverified'));
 });

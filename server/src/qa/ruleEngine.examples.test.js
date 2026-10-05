@@ -7,16 +7,18 @@ import assert from 'node:assert/strict';
 import { checkHardRules } from './ruleEngine.js';
 
 const examples = [
-  // 業務動態（完成態）
-  { scene: 'business', text: `號碼定咗。\n\n群裡一句「搞掂」，\n背後成個流程安安穩穩，冇甩漏。\n\n好事，通常都係靜靜哋發生嘅。\n\n#明哥中港牌` },
-  { scene: 'business', text: `驗完車。\n\n群裡最平淡嗰三個字——\n「冇問題」。\n\n最抵聽嘅，往往就係呢種。\n\n#明哥中港牌` },
+  // 業務動態（完成態）【2026-10-05 更新】原两条「群裡一句『搞掂』」示例已随
+  // r-group-screenshot 规则废弃（无截图不得提群），换用当前风格锚
+  { scene: 'business', text: `號碼定咗。\n\n背後成個流程安安穩穩，冇甩漏。\n\n好事，通常都係靜靜哋發生嘅。\n\n#明哥中港牌` },
+  { scene: 'business', text: `驗完車。\n\n最平淡嗰句回覆，往往就係最抵聽嗰句。\n\n唔使多講。\n\n#明哥中港牌` },
   { scene: 'business', text: `卡裝好。\n\n由呢一刻起，\n關口兩邊，唔再係兩個世界。\n\n#明哥中港牌` },
   // 車源 / 交車
   { scene: 'car', text: `交車。\n\n佢先繞住部車行咗一圈，先開門上車。\n\n有啲嘢，坐低就知，\n唔使多講。\n\n#明哥中港牌` },
   { scene: 'car', text: `今日主角，RX300。\n\n唔張揚，\n但企喺度，自有一種從容。\n\n啱嗰啲唔急住向人證明啲咩嘅人。\n\n#明哥中港牌` },
-  // 到店 / 忙日
-  { scene: 'business', text: `一對夫婦，結伴嚟辦蓮塘。\n\n一個問得仔細，一個聽得認真。\n跨境呢件事，從來唔係一個人嘅決定。\n\n合同簽好，路就開始。\n\n#明哥中港牌` },
-  { scene: 'business', text: `一日，幾單。\n\n大橋嘅、蓮塘嘅，\n有啲傾咗好耐，今日終於落定。\n\n寫喺日程表，淨係幾行字。\n背後嘅往來，只有當事人知。\n\n#明哥中港牌` },
+  // 到店 / 忙日（口岸出现在文案里时，userText 视作用户输入的依据——
+  // r-port-unverified 已升级为阻断：口岸只能来自用户输入/图片）
+  { scene: 'business', userText: '一對夫婦，結伴嚟辦蓮塘', text: `一對夫婦，結伴嚟辦蓮塘。\n\n一個問得仔細，一個聽得認真。\n跨境呢件事，從來唔係一個人嘅決定。\n\n合同簽好，路就開始。\n\n#明哥中港牌` },
+  { scene: 'business', userText: '大橋嘅、蓮塘嘅，有啲傾咗好耐，今日終於落定', text: `一日，幾單。\n\n大橋嘅、蓮塘嘅，\n有啲傾咗好耐，今日終於落定。\n\n寫喺日程表，淨係幾行字。\n背後嘅往來，只有當事人知。\n\n#明哥中港牌` },
   { scene: 'business', text: `中秋前，仲有客人放工過嚟。\n\n唔急住定，慢慢傾，\n方案理順，攞返屋企同屋企人再商量。\n\n呢種慎重，先係長遠嘅做法。\n\n#明哥中港牌` },
   // 科普
   { scene: 'edu', text: `好多人問：\n點解我架車入唔到內地？\n\n兩地牌分方向——\n一邊港車北上，一邊內地車南下。\n唔係貴唔貴，係啱唔啱。\n\n#明哥中港牌` },
@@ -31,8 +33,8 @@ const examples = [
 
 test('§10 全部 14 条示例通过硬规则', () => {
   assert.equal(examples.length, 14);
-  for (const { text, scene } of examples) {
-    const r = checkHardRules(text, { scene });
+  for (const { text, scene, userText = '' } of examples) {
+    const r = checkHardRules(text, { scene, userText });
     assert.equal(
       r.pass, true,
       `未通过[${scene}]：${text.slice(0, 24)}… -> ${r.violations.map(v => v.msg).join('；')}`

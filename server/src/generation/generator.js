@@ -1,15 +1,18 @@
-// 生成层：调用 LLM，三档语气 × 三个叙事角度，产出 3 版文案 + 配图建议
+// 生成层：调用 LLM，三档语气 × 三个叙事角度，产出 3 版文案
 //
 // 关键约定：
 // 1. LLM 调用失败【抛错】，不再静默返回 demo 文案 —— 否则用户会把假文案当真的发出去
 // 2. demo 文案仅在「未配置 key」时提供
 // 3. parseOutput 对 LLM 输出格式漂移做强容错，并 export 供测试
 // 4. rewriteVersion 供质检管线（pipeline.js）做反思改写，失败返回 null 不上抛
+// 5. 事实红线（2026-10-05 明哥确认）：文案中每个事实细节（口岸/群聊/引语/时间）
+//    只能来自用户文字或图片，没有就不写——缺关键信息由感知层追问或规则层拦截
 
-import { TONE_PRESETS, IMAGE_DIRECTIONS, STYLE_EXEMPLARS, TONE_ANTI_PATTERNS, SERVICE_DETAIL_HINTS } from '../knowledge/corpus.js';
+import { TONE_PRESETS, STYLE_EXEMPLARS, TONE_ANTI_PATTERNS, SERVICE_DETAIL_HINTS } from '../knowledge/corpus.js';
 import { retrieveKnowledge } from '../perception/vision.js';
 import { findCorrections } from '../memory/store.js';
 import { llmChat, llmKeyUsable } from '../llm/client.js';
+import { traceRaw } from '../llm/trace.js';
 
 // 星期按香港时区计算：服务器/容器若为 UTC，香港 0-8 点会差一天（§10 早安硬约束）
 const WEEKDAY_ZH = { Sun: '日', Mon: '一', Tue: '二', Wed: '三', Thu: '四', Fri: '五', Sat: '六' };
@@ -37,12 +40,13 @@ const STYLE_CONSTRAINTS = `【风格硬约束】
 - 未来时间节点（2026-10-04 明哥硬要求）：下週/明天/星期幾/幾號等具体时间，只能来自用户文字或图片信息——输入和图都没有的，绝对不写；后续步骤用不带时间的说法（「之後仲有裝卡」「下一步照流程行」）
 - 收尾平实为常态，偶尔点睛即可；句句都求金句 = 做作（多数平实收尾，一句点睛即止）
 - 感谢（若用）要具体（如「感謝一份不疑的信任」落在信任行为上），不用「感恩託付」类空洞口号
-- 收尾与祝福（2026-10-04 明哥澄清）：祝福自由发挥、可以更高级，不限定句式；唯一要求是**不重复**——同一句收尾/祝福，本次三版之间不得雷同，与近期发过的文案也不得雷同（视觉疲劳的根源是复读，不是句式）
+- 收尾与祝福（2026-10-04 明哥澄清）：祝福自由发挥、可以更高级，不限定句式；不得与**近期发过的**文案重复同一句收尾（视觉疲劳的根源是复读，不是句式）；本次三版之间收尾可以相同（2026-10-05 明哥澄清：三版只要求文字不完全一样，轻微改写即可）
 - 篇幅：以信息完整为准，理想 60–120 字，上限 150 字；不堆字数凑长度，也不为短而砍掉血肉
-- 晒单/成交可用信息完整的标题句开头（如「今日成交，蓮塘口岸兩地牌」），一行说清 事由+业务+口岸
+- 晒单/成交可用信息完整的标题句开头（一行讲清事由+业务；口岸等具体事实只能用用户输入或图里出现的，没有就不写）
 - 收尾落款 #明哥中港牌 单独成行（短语如「路上見」放落款前一行）
 - 不出现任何具体数字（成交价/车牌号/里程）
-- 晒单必须真实，不虚构成交/聊天/客户评价
+- 晒单必须真实：所有引语/对话/群消息/客户反应必须逐字来自用户输入或截图原文，一个字都不能编；没有截图不得提群
+- 口岸是本次成交的关键事实：只能用用户文字或图片里出现的口岸，凭空写即事故
 - 皇崗/文錦渡不得写成可办理（已停批，只能作谈资）${antiPatternBlock()}`;
 
 function sceneRuleOf(scene) {
@@ -67,6 +71,7 @@ function visionBlockOf(vision) {
 // 图文呼应（2026-10-04 二次澄清）：用户上传的图片 = 本条朋友圈的配图，
 // 图内信息是创作素材（截图业务节点/对话、车型颜色、海报氛围），须看懂并用进文案。
 // 降级/不支持的图（无有效识别结果）不注入，避免误导。
+// 【2026-10-05 明哥反馈后收紧】截图引语必须逐字来自截图原文，不得改写/仿写。
 function imageEchoBlockOf(vision) {
   if (!vision || vision._degraded || vision._unsupported) return '';
   const ex = vision.extracted || {};
@@ -76,22 +81,40 @@ function imageEchoBlockOf(vision) {
   if (ex.ports?.length) bits.push(`口岸：${ex.ports.join('、')}`);
   return `\n\n【图文呼应（重要）】用户提供的图片就是本条朋友圈的配图。图内信息是真实素材，文案要与图呼应：
 - 图类型：${vision.type}${bits.length ? `\n- 识别到：${bits.join('；')}` : ''}
-- 群聊截图：图内业务节点（選號完成/口岸/車型）作事实素材，用明哥口吻直说；群里短反应可作细节引用（如「一句『搞掂』」），但群消息不能成为事件本身——检验：把群内容删掉文案仍成立才可用；不复述图内新闻（截图已交代语境）
+- 群聊截图：图内业务节点（選號完成/口岸/車型）作事实素材，用明哥口吻直说；引用群消息时，引语必须与截图原文逐字一致，截图里没有的字句一个都不能写——宁可不引用，绝不编造；群消息不能成为事件本身
 - 客户姓名：图中出现的任何客户姓名/称呼一律不写入文案，用「客戶」「一對夫婦」等泛称（硬要求）
 - 时间节点：图中/输入中提到的时间（如「下週安排裝卡」）可如实沿用；都没有的时间节点绝不自行编造（硬要求），后续步骤只说不带时间的说法
 - 车辆图：车型、颜色、场景可自然融入文案
-- 海报：文案情绪与图的主题氛围一致
-- IMAGE_PLAN 基于这张图给指引：直接用此图时注明；需打码（頭像/暱稱/電話/車牌）或补图时说明`;
+- 海报：文案情绪与图的主题氛围一致`;
 }
 
 // 服务细节随机块（2026-10-04 明哥补充服务事实）：可选点缀，随机 0-1 个方向，
 // 挂在本单真实环节上化用；早安/节日/科普等禁硬广场景不注入。
+// 【2026-10-05 明哥反馈后收紧】删去「专属业务群」表述（无截图提群 = 虚构），
+// 并明令：化用服务细节不得虚构具体对话/引语，未上传群聊截图时文案不得出现「群」。
 function serviceDetailBlockOf(scene) {
   if (!['business', 'car'].includes(scene)) return '';
   return `
 
-【服务细节（可选点缀，非必带）】服务本质：签约后每客有专属业务群与专属进度跟踪人，选号/验车等外出环节专人陪同，进度主动汇报、客户无需操心。若与本单内容自然契合，可选 0-1 个方向化用（须挂在本单真实环节上），三版不必都有、可以都不带；禁止口号化自称（全流程一站式/贴心/行业天花板等），禁止整句照搬：
+【服务细节（可选点缀，非必带）】服务本质：签约后每客有专属进度跟踪人，选号/验车等外出环节专人陪同，进度主动汇报、客户无需操心。若与本单内容自然契合，可选 0-1 个方向化用（须挂在本单真实环节上），三版不必都有、可以都不带；化用时只写服务方式本身，不得虚构具体对话/引语/群消息；未上传群聊截图时，文案不得出现「群」字样；禁止口号化自称（全流程一站式/贴心/行业天花板等），禁止整句照搬：
 ${SERVICE_DETAIL_HINTS.map(h => '- ' + h.dir + '（语感参考：' + h.eg + '）').join('\n')}`;
+}
+
+// 交車（車輛交付）場景專屬約束（2026-10-05 明哥業務反饋）：
+// 默認純購車、交付即完結；不寫客戶到場次數；公司位於香港；收尾用高級祝福而非「路上見/各自返程」。
+// 若輸入本身涉及兩地牌（裝卡/選號/驗車/牌），則不套用純購車口徑。
+const CAR_DELIVERY_RE = /交車|交车|提車|提车|交付|交咗部|交左部/;
+function carDeliveryBlockOf(text) {
+  const t = String(text || '');
+  if (!CAR_DELIVERY_RE.test(t)) return '';
+  if (/兩地牌|两地牌|裝卡|装卡|選號|选号|驗車|验车|辦牌|办牌/.test(t)) return '';
+  return `
+
+【本次是「交車／車輛交付」（重要業務口徑）】
+- 交車＝把車交付客戶。默認純購車：**交付即完結**，之後沒有任何流程——不得添加裝卡／選號／驗車／牌等兩地牌後續。
+- 客戶到場次數不寫：買家甚至唔使親自到場，手續我哋辦完佢開走；不要寫「兩次／兩隻手數得晒／出現幾次」之類。
+- 公司本部位於香港，香港客戶是本地客戶：不得寫「客戶從香港過來／趕來」。
+- 收尾自行依內容生成：把落點放在祝福、信任／關係，或前路意象上，短而真誠、平實但得體；**禁用「路上見」「各自返程」**等口頭禪或掃興收尾，也不要用固定句式套模板（三版收尾各不相同，與近期發過的也不重複）。`;
 }
 
 function factBlockOf(knowledge) {
@@ -121,10 +144,9 @@ function exemplarBlockOf(scene, toneSamples = []) {
 }
 
 // 版本 i 的（写法, 语气）组合：
-// - 3 版：每版一条写法路径（直述/觀點/白描），语气逐版轮换
-// - 6 版（Best-of-N）：每条写法 × 2 语气，交给质检筛选
-// 【2026-10-04 明哥澄清】三版 = 同一内容的三种写法（多账号分发防微信折叠），
-// 不是素材角度矩阵——写法路径不依赖额外素材，任何输入都成立。
+// - 写法标签（寫法 A/B/C）只是展示序号，不再代表不同叙事路径（2026-10-05 明哥澄清：
+//   三版 = 同一文案的轻微改写，差异只来自措辞，不换角度不加料）
+// - 语气档仍逐版轮换，作为候选池的自然变化来源，由质检筛选
 function comboOf(i, approaches, tones, versionCount) {
   const a = approaches[i % approaches.length];
   const t = tones[versionCount > approaches.length
@@ -148,27 +170,21 @@ ${STYLE_CONSTRAINTS}
 
 【场景】${scene}
 ${sceneRuleOf(scene)}
-${visionBlockOf(vision)}${imageEchoBlockOf(vision)}
+${visionBlockOf(vision)}${imageEchoBlockOf(vision)}${carDeliveryBlockOf(text)}
 
 【用户输入】${text || '（仅图，无文字）'}
 ${factBlockOf(knowledge)}
 
-【三版含义（重要）】
-明哥有多个账号要发同一条朋友圈，相同内容会被微信折叠。三版 = 同一内容的三种不同写法：
-- 事实与信息一致（同一事件/素材），但结构、切入、措辞明显不同——不能只换几个词，要换整体写法
-- 写法不限定，由本次内容与素材决定。参考方向（仅参考，不强制对应，也不限于这些）：
-  · 直述——事实说清楚（谁、做了什么、结果），干净利落
-  · 观点——专业判断切入（句式感如「專業從非速答，而是精準匹配」），落到事实
-  · 白描——用真实存在的一个场面/细节呈现，点到即止
-  · 素材导向——群聊截图：图内业务节点作事实用明哥口吻直说，群里短反应可作细节（如「一句『搞掂』」），群消息不作事件本身、不复述图内新闻；车辆图：从车型气质生发；海报：与图的情绪呼应
-- 每版都是完整可发的正常文案：有实质内容（人物/事件/结果至少两项，来自输入或配图），禁止纯氛围白描
-- 收尾方式自由（平实句 / 祝福 / 点睛均可），三版收尾不得雷同
+【三版含义（重要，2026-10-05 明哥再次明确）】
+明哥有多个账号要发同一条朋友圈，文本完全一样会被微信折叠。三版 = **同一条文案的轻微改写**：
+- 事实、信息、结构、语气、收尾全部保持一致，只做措辞级改写：换词、同义替换、调整句序或连接词
+- 三版之间允许 90% 以上相似，只要文字不是完全一样即可（哪怕只替换几个词也合格）；收尾可以相同
+- 严禁为了制造差异而换叙事角度、增删事实、改细节或编新写法——差异只来自措辞
+- 任何一版单独看，都是同一条朋友圈
 
-【本次三版（写法自选，须彼此明显不同）】
+【本次 ${versionCount} 版（同一内容的轻微改写，互不完全相同即可）】
 ${combos}
 
-【配图方向】
-${IMAGE_DIRECTIONS[scene] || IMAGE_DIRECTIONS.daily}
 ${serviceDetailBlockOf(scene)}
 ${exemplarBlockOf(scene, toneSamples)}
 ${corrBlockOf(corrections)}
@@ -177,8 +193,7 @@ ${corrBlockOf(corrections)}
 
 ${versionBlocks}
 
-全部版本之后另起两行输出：
-IMAGE_PLAN: <可执行配图指令，画面主体/构图/文字，带编号>
+全部版本之后另起一行输出：
 SCENE_NOTES: <简短交代写作理由>`;
 }
 
@@ -196,24 +211,34 @@ export async function generate({ text = '', vision = null, scene = 'unknown', an
 
   const prompt = buildPrompt({ text, vision, scene, angles, tones, knowledge, corrections, toneSamples, versionCount });
 
-  let content;
-  try {
-    content = await llmChat([
-      { role: 'system', content: '你是一名粤港商务质感的资深文案，按用户要求生成朋友圈短文案。' },
-      { role: 'user', content: prompt }
-    ], {
-      // 6 版候选时按比例放大 token 上限，避免半截截断；
-      // 网关模型为推理模式（思考计入 completion），额外 +600 思考余量
-      max_tokens: (versionCount > 3 ? Math.min(2800, 1300 * Math.ceil(versionCount / 3)) : 1500) + 600,
-      // 温度 0.85 实测偏飘（做作感来源之一），克制风格不需要过高随机性
-      temperature: 0.72
-    });
-  } catch (e) {
-    // 不降级为 demo —— 让上层返回错误，避免假文案被当真
-    throw new Error(`调用 LLM 失败：${String(e.message || e)}`);
-  }
+  // token 上限：关闭推理后 6 版正文仅需千余 token，此处给足冗余作为兜底。
+  // max_tokens 只是上限、不产生额外费用；若 LLM_REASONING=on，也为思考留出空间。
+  const maxTokens = versionCount > 3 ? 8000 : 4000;
+  const systemPrompt = '你是一名粤港商务质感的资深文案，按用户要求生成朋友圈短文案。';
+  const MAX_ATTEMPTS = 2; // 解析失败重试一次（格式漂移兜底）
+  let last = null;
 
-  return parseOutput(content, angles, tones, scene, versionCount);
+  for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+    let content;
+    try {
+      content = await llmChat([
+        { role: 'system', content: systemPrompt },
+        { role: 'user', content: prompt }
+      ], { max_tokens: maxTokens, temperature: 0.72, label: 'generate' });
+    } catch (e) {
+      // 不降级为 demo —— 让上层返回错误，避免假文案被当真
+      throw new Error(`调用 LLM 失败：${String(e.message || e)}`);
+    }
+    const parsed = parseOutput(content, angles, tones, scene, versionCount);
+    if (!parsed.parseFailed) return parsed;
+    last = parsed;
+    // 解析失败留痕原始输出（此前无任何痕迹，无法定位）
+    await traceRaw('generate-parse-failed', {
+      ts: new Date().toISOString(), attempt, parseNote: parsed.parseNote, content
+    });
+    console.warn(`[generator] 解析仅得 ${parsed.versions.length}/${versionCount} 版${attempt < MAX_ATTEMPTS ? '，重试一次' : '，放弃'}`);
+  }
+  return last;
 }
 
 // ========== 反思改写（供 pipeline 质检循环调用）==========
@@ -226,7 +251,7 @@ export async function rewriteVersion({ text, scene, angle, tone, userText, visio
   const fb = [
     feedback.violations?.length ? `- 硬规则违规（必须全部消除）：${feedback.violations.join('；')}` : null,
     feedback.score ? `- 软评分：${feedback.score}（低于 70 分需明显提升）` : null,
-    feedback.similar ? `- 防重复：${feedback.similar}（必须换叙事角度与措辞，避免雷同）` : null
+    feedback.similar ? `- 防重复：${feedback.similar}（只需换些措辞、句序，避免与旧稿几乎完全相同，不必换写法）` : null
   ].filter(Boolean).join('\n');
 
   const prompt = `你是「明哥中港牌」朋友圈文案 Agent。以下一版文案未通过质检，请重写这一版（保持叙事角度：${angle}；语气档：${tone}）。
@@ -235,7 +260,7 @@ ${STYLE_CONSTRAINTS}
 
 【场景】${scene}
 ${sceneRuleOf(scene)}
-${visionBlockOf(vision)}${imageEchoBlockOf(vision)}
+${visionBlockOf(vision)}${imageEchoBlockOf(vision)}${carDeliveryBlockOf(userText)}
 
 【用户输入】${userText || '（仅图，无文字）'}
 ${factBlockOf(knowledge)}
@@ -254,10 +279,11 @@ ${corrBlockOf(corrections)}
     const content = await llmChat([
       { role: 'system', content: '你是一名粤港商务质感的资深文案，按质检反馈重写朋友圈短文案，只输出正文。' },
       { role: 'user', content: prompt }
-    ], { max_tokens: 1600 }); // 推理模型：思考计入 completion，须留思考余量
+    ], { max_tokens: 3000, label: 'rewrite' });
     const cleaned = String(content).replace(/```[a-z]*\n?|\n?```/g, '').trim();
     return cleaned || null;
-  } catch {
+  } catch (e) {
+    console.warn('[generator] rewrite 失败:', String(e?.message || e).slice(0, 160));
     return null;
   }
 }
@@ -296,10 +322,9 @@ function stripSeparators(text) {
 export function parseOutput(content, angles, tones = TONE_PRESETS.map(t => t.name), scene = 'unknown', maxVersions = 3) {
   const cleaned = stripMarkdown(String(content || ''));
 
-  // 元信息（IMAGE_PLAN / SCENE_NOTES）无论出现在哪都要抽出来
-  const imgMatch = cleaned.match(/IMAGE_PLAN\s*:\s*([\s\S]*?)(?=\n\s*SCENE_NOTES\s*:|$)/i);
+  // 元信息（SCENE_NOTES）抽出；IMAGE_PLAN 已废除（2026-10-05），
+  // 若模型仍输出则由 extractMeta 摘除、不进正文也不回落默认模板
   const notesMatch = cleaned.match(/SCENE_NOTES\s*:\s*([\s\S]*)$/i);
-  const imagePlan = imgMatch ? imgMatch[1].trim() : (IMAGE_DIRECTIONS[scene] || IMAGE_DIRECTIONS.daily);
   const sceneNotes = notesMatch ? notesMatch[1].trim() : '';
 
   // 摘除元信息段，只留正文区
@@ -337,7 +362,6 @@ export function parseOutput(content, angles, tones = TONE_PRESETS.map(t => t.nam
   if (chunks.length < Math.min(maxVersions, 3)) {
     return {
       versions: chunks.map((text, i) => ({ text, ...assign(i) })),
-      imagePlan,
       sceneNotes,
       parseFailed: true,
       parseNote: `LLM 仅解析出 ${chunks.length}/${maxVersions} 版，请重试`
@@ -346,7 +370,6 @@ export function parseOutput(content, angles, tones = TONE_PRESETS.map(t => t.nam
 
   return {
     versions: chunks.slice(0, maxVersions).map((text, i) => ({ text, ...assign(i) })),
-    imagePlan,
     sceneNotes
   };
 }
@@ -356,8 +379,8 @@ function demoGenerate({ scene, angles, tones }) {
   const wd = todayWeekday();
   const samples = {
     business: [
-      '號碼定咗。\n\n群裡一句「搞掂」，\n背後成個流程安安穩穩，冇甩漏。\n\n好事，通常都係靜靜哋發生嘅。\n\n#明哥中港牌',
-      '驗完車。\n\n群裡最平淡嗰三個字——\n「冇問題」。\n\n最抵聽嘅，往往就係呢種。\n\n#明哥中港牌',
+      '號碼定咗。\n\n背後成個流程安安穩穩，冇甩漏。\n\n好事，通常都係靜靜哋發生嘅。\n\n#明哥中港牌',
+      '驗完車。\n\n最平淡嗰句回覆，往往就係最抵聽嗰句。\n\n唔使多講。\n\n#明哥中港牌',
       '卡裝好。\n\n由呢一刻起，\n關口兩邊，唔再係兩個世界。\n\n#明哥中港牌'
     ],
     car: [
@@ -398,7 +421,6 @@ function demoGenerate({ scene, angles, tones }) {
       angle: angles[i % angles.length],
       tone: tones[i % tones.length]
     })),
-    imagePlan: IMAGE_DIRECTIONS[scene] || IMAGE_DIRECTIONS.daily,
     sceneNotes: '[演示版本] 配置 DEEPSEEK_API_KEY 后切换为真实生成。'
   };
 }

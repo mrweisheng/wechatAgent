@@ -2,6 +2,7 @@
 import 'dotenv/config';
 import express from 'express';
 import multer from 'multer';
+import crypto from 'node:crypto';
 import path from 'node:path';
 import fs from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
@@ -23,41 +24,26 @@ const __dirname = path.dirname(__filename);
 
 const app = express();
 const PORT = process.env.PORT || 3000;
-const INVITE = (process.env.INVITE_CODE || '').trim();
-const AUTH_DISABLED = (process.env.AUTH_DISABLED || '').toLowerCase() === 'true';
-
-// ---- 安全：fail-closed ----
-// 未配置邀请码 = 全部 API 裸奔。默认拒绝启动，需显式 AUTH_DISABLED=true 才放行。
-const PUBLIC_PATHS = new Set(['/api/login', '/api/healthz', '/api/intel/push', '/api/intel/topics']);
-if (!AUTH_DISABLED && (!INVITE || /REPLACE/.test(INVITE))) {
-  console.error('[FATAL] 未配置 INVITE_CODE，所有 /api 将无鉴权。');
-  console.error('        请在 .env 设置 INVITE_CODE，或显式设置 AUTH_DISABLED=true 关闭鉴权。');
-  process.exit(1);
-}
-if (AUTH_DISABLED) {
-  console.warn('[WARN] AUTH_DISABLED=true —— 全部接口无鉴权，仅限本机开发。');
-}
 
 app.use(express.json({ limit: '2mb' }));
 app.use(express.urlencoded({ extended: true, limit: '2mb' }));
 
-// ---- 鉴权中间件（放在 healthz / intel push 放行之后注册）----
-app.use((req, res, next) => {
-  if (AUTH_DISABLED) return next();
-  if (PUBLIC_PATHS.has(req.path)) return next();
-  if (req.path.startsWith('/api/')) {
-    const code = req.headers['x-invite-code'];
-    if (!code || code !== INVITE) return res.status(401).json({ ok: false, error: '未授权' });
-  }
-  next();
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 5 * 1024 * 1024, files: 4, fieldSize: 2 * 1024 * 1024 }
 });
 
-const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 5 * 1024 * 1024, files: 4 } });
+// 常数时间比较（推送 token 等密钥比对，防时序侧信道；先散列归一长度）
+function safeEqual(a, b) {
+  const ha = crypto.createHash('sha256').update(String(a)).digest();
+  const hb = crypto.createHash('sha256').update(String(b)).digest();
+  return crypto.timingSafeEqual(ha, hb);
+}
 
 // 包装 async 路由：Express 4 不捕获 promise rejection，否则进程会崩
 const wrap = fn => (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next);
 
-// ---- 简单失败限流（防邀请码/推送 token 暴力尝试，无外部依赖）----
+// ---- 简单失败限流（防推送 token 暴力尝试，无外部依赖）----
 // 按 IP 记录 401 失败次数，窗口内超限直接 429；成功后清零。
 // 反向代理部署时所有请求同源 IP，属已知局限（单用户场景可接受，见 README）。
 const authFails = new Map();
@@ -65,8 +51,12 @@ const RL_WINDOW_MS = 10 * 60 * 1000;
 const RL_MAX_FAILS = 10;
 function failRateLimit(req, res, next) {
   const ip = req.socket.remoteAddress || 'unknown';
-  const rec = authFails.get(ip);
   const now = Date.now();
+  // 防内存无界增长：超过阈值时清理已过期窗口（长期运行不被大量一次性失败 IP 撑大）
+  if (authFails.size > 1000) {
+    for (const [k, v] of authFails) if (v.until <= now) authFails.delete(k);
+  }
+  const rec = authFails.get(ip);
   if (rec && rec.until > now && rec.count >= RL_MAX_FAILS) {
     res.set('Retry-After', Math.ceil((rec.until - now) / 1000));
     return res.status(429).json({ ok: false, error: '尝试过于频繁，请稍后再试' });
@@ -98,7 +88,7 @@ function isLlmConfigured() {
   return k.startsWith('sk-') || k.startsWith('oc_sk_');
 }
 
-// ---- 完整健康检查（需鉴权）：渠道真实状态 ----
+// ---- 完整健康检查：渠道真实状态 ----
 app.get('/api/health', wrap(async (req, res) => {
   res.json({
     ok: true,
@@ -110,35 +100,27 @@ app.get('/api/health', wrap(async (req, res) => {
   });
 }));
 
-// ---- 登录（带失败限流）----
-app.post('/api/login', failRateLimit, (req, res) => {
-  const { code } = req.body || {};
-  if (AUTH_DISABLED) return res.json({ ok: true, token: 'disabled' });
-  if (code && code === INVITE) return res.json({ ok: true, token: code });
-  res.status(401).json({ ok: false, error: '邀请码错误' });
-});
-
 // ---- 核心生成（管线：生成 → 硬规则 → 软评分 → 去重 → 反思改写）----
 app.post('/api/generate', upload.array('images', 4), wrap(async (req, res) => {
   const text = ((req.body && req.body.text) || '').trim();
   // 多图支持（2026-10-04 审核采纳）：最多 4 张（主图 + 群聊截图等常见组合），
   // 逐张识别后合并要素；全部降级才算降级；非图片文件如实提示
   const files = req.files || [];
+  const unsupportedMimes = [];
   let vision = null;
   let degraded = false;
 
   if (files.length) {
-    const visions = [];
-    for (const f of files) {
-      if (isImageMime(f.mimetype)) {
-        visions.push(await classifyImage(f.buffer, f.mimetype));
-      } else {
-        degraded = true;
-        visions.push({ _unsupported: f.mimetype });
-      }
-    }
+    // 多张并行识别（原先串行，4 张图最长等 4 分钟）
+    const visions = await Promise.all(files.map(async f => {
+      if (isImageMime(f.mimetype)) return classifyImage(f.buffer, f.mimetype);
+      unsupportedMimes.push(f.mimetype);
+      return { _unsupported: f.mimetype };
+    }));
     vision = visions.length > 1 ? mergeVisions(visions) : visions[0];
     degraded = !!vision?._degraded;
+    // 注意：非图片文件标记不能依赖 mergeVisions 的返回值——合并会过滤掉
+    // _unsupported/_degraded 项，混合上传时曾把非图片静默吞掉、零提示
   }
 
   const scene = routeScene({ text, vision });
@@ -156,17 +138,22 @@ app.post('/api/generate', upload.array('images', 4), wrap(async (req, res) => {
   // LLM 失败直接抛错，由 error handler 转 502 —— 不再返回假文案
   const out = await runPipeline({ text, vision, scene, angles });
 
-  await addHistory({
-    scene, text,
-    visionType: vision?.type || null,
-    angles,
-    versions: out.versions.map(v => ({
-      angle: v.angle, tone: v.tone, pass: v.hardCheck.pass,
-      text: v.text,
-      score: v.score?.total ?? null,
-      similarity: v.similarity ?? 0
-    }))
-  });
+  // 历史写库失败不拖累生成结果：LLM 已成功产出，不能因追加历史抛错让前端拿到 500
+  try {
+    await addHistory({
+      scene, text,
+      visionType: vision?.type || null,
+      angles,
+      versions: out.versions.map(v => ({
+        angle: v.angle, tone: v.tone, pass: v.hardCheck.pass,
+        text: v.text,
+        score: v.score?.total ?? null,
+        similarity: v.similarity ?? 0
+      }))
+    });
+  } catch (e) {
+    console.error('[history] 历史写入失败（不影响生成结果）:', e?.message || e);
+  }
 
   res.json({
     ok: true,
@@ -174,15 +161,18 @@ app.post('/api/generate', upload.array('images', 4), wrap(async (req, res) => {
     angles,
     versions: out.versions,
     candidates: out.candidateCount || out.versions.length,
-    imagePlan: out.imagePlan,
     sceneNotes: out.sceneNotes,
     demo: !!out.demo,
     degraded,
     degradedReason: vision?._degradedReason || null,
     parseFailed: !!out.parseFailed,
     parseNote: out.parseNote || null,
+    // 截图含隐私时提醒打码（配图是用户自己的图，文案层无从替他打码，只提示）
+    maskReminder: vision?.extracted?.hasPII === true,
     error: out.error || null,
-    warning: vision?._unsupported ? `暂不支持识别 ${vision._unsupported}，请转 JPG/PNG` : null
+    warning: unsupportedMimes.length
+      ? `暂不支持识别 ${unsupportedMimes.join('、')}，已跳过该文件，请转 JPG/PNG`
+      : null
   });
 }));
 
@@ -212,10 +202,11 @@ app.get('/api/history', wrap(async (req, res) => {
   res.json({ ok: true, items: await recentHistory(20) });
 }));
 
-// ---- 情报线：本地搜索（需鉴权）----
+// ---- 情报线：本地搜索 ----
 app.post('/api/intel/run', wrap(async (req, res) => {
   const fresh = await runIntelOnce();
-  res.json({ ok: true, freshCount: fresh.length, items: fresh });
+  // runIntelOnce 返回统计对象 { ok, added, received, ... }（不是数组），直接展开
+  res.json({ ok: true, ...fresh });
 }));
 
 // ---- 情报线：外部 Agent 推送（公开，走独立 token 鉴权 + 失败限流）----
@@ -226,7 +217,7 @@ app.post('/api/intel/push', failRateLimit, wrap(async (req, res) => {
     return res.status(503).json({ ok: false, error: '未配置 INTEL_PUSH_TOKEN，推送接口未启用' });
   }
   const token = req.headers['x-push-token'] || (req.body && req.body.token);
-  if (!token || token !== PUSH_TOKEN) {
+  if (!token || !safeEqual(token, PUSH_TOKEN)) {
     return res.status(401).json({ ok: false, error: '推送 token 无效' });
   }
   const r = await ingestIntel(req.body);
@@ -268,13 +259,25 @@ app.use(express.static(path.resolve(__dirname, '../../public')));
 app.use((err, req, res, next) => {
   if (res.headersSent) return next(err);
 
-  // 1) body 解析失败 = 客户端问题
-  if (err?.type === 'entity.parse.failed' || err instanceof SyntaxError) {
+  // 1) body 解析失败 = 客户端问题（只认 body-parser 的类型标记；
+  //    业务代码自己抛的 SyntaxError 不该被误报成「JSON 不合法」）
+  if (err?.type === 'entity.parse.failed') {
     return res.status(400).json({ ok: false, error: '请求体不是合法 JSON' });
   }
   // 2) multer 文件过大
   if (err?.code === 'LIMIT_FILE_SIZE') {
     return res.status(413).json({ ok: false, error: '图片超过 5MB，请压缩后重试' });
+  }
+  // 2b) multer 字段名不符 / 文件数超限（原先落到 500 通用错误，无从排查）
+  if (err?.code === 'LIMIT_UNEXPECTED_FILE') {
+    return res.status(400).json({ ok: false, error: '图片字段名不符（应使用 images，最多 4 张）' });
+  }
+  if (err?.code === 'LIMIT_FILE_COUNT') {
+    return res.status(400).json({ ok: false, error: '图片数量超过上限（最多 4 张）' });
+  }
+  // 2c) 文本字段过大（textarea 粘贴超长内容；multipart 不受 express.json 限制约束）
+  if (err?.code === 'LIMIT_FIELD_SIZE') {
+    return res.status(413).json({ ok: false, error: '文字内容过长（上限 2MB），请精简后重试' });
   }
   // 3) LLM 上游失败 = 502，并把原因如实告知（前端会红色横幅提示，避免把假文案当真）
   const msg = String(err?.message || err);
@@ -290,6 +293,5 @@ app.use((err, req, res, next) => {
 // ---- 启动 ----
 app.listen(PORT, () => {
   console.log(`[server] listening on http://localhost:${PORT}`);
-  console.log(`[auth] ${AUTH_DISABLED ? 'DISABLED（无鉴权）' : 'INVITE_CODE 已启用'}`);
   startIntelCron();
 });

@@ -1,6 +1,6 @@
 // 感知层：多模态输入 + 图型自识别 + 意图路由 + 信息缺口检测
 
-import { KNOWLEDGE_BASE } from '../knowledge/corpus.js';
+import { KNOWLEDGE_BASE, AVAILABLE_PORTS } from '../knowledge/corpus.js';
 import { llmChat, llmKeyUsable } from '../llm/client.js';
 
 // 含 iPhone HEIC/HEIF 与 AVIF —— 原先只认 jpeg/png/webp/gif，HEIC 被静默丢弃
@@ -32,8 +32,8 @@ export async function classifyImage(imageBuffer, mime) {
         { type: 'text', text: prompt },
         { type: 'image_url', image_url: { url: dataUrl } }
       ] }
-    // 推理模型：思考计入 completion；OCR 类任务推理波动大（实测手绘截图可超 1500），给 2500
-    ], { max_tokens: 2500, timeoutMs: 60000 });
+    // OCR/识别任务给足上限（max_tokens 是上限不计费；关闭推理后用量远低于此）
+    ], { max_tokens: 3000, timeoutMs: 60000, label: 'vision' });
     if (!raw) return fallbackClassify('llm_empty');
     return JSON.parse(raw.replace(/```json\n?|\n?```/g, '').trim());
   } catch (e) {
@@ -94,6 +94,13 @@ export function detectMissing({ scene, text, vision }) {
   switch (scene) {
     case 'business':
       if (!hasText && !ve.status) missing.push('業務關鍵狀態（如：選號完成 / 驗車通過 / 裝卡通關）');
+      // 口岸是本次成交的关键事实（2026-10-05 明哥确认：绝不虚构）——
+      // 输入/图片都没有时，宁可追问也不让模型自己「配」一个
+      if (/兩地牌|两地牌|裝卡|装卡|選號|选号|驗車|验车|通關|通关|過關|过关/.test(text)
+        && !ve.ports?.length
+        && !AVAILABLE_PORTS.some(p => text.includes(p))) {
+        missing.push('本次口岸（蓮塘 / 深圳灣 / 沙頭角 / 港珠澳大橋；尚未確定就寫「未定」）');
+      }
       break;
     case 'car':
       if (!ve.cars?.length && !/三十系|四十系|30系|40系|RX|埃爾法|埃尔法|Alphard|Model/.test(text)) {

@@ -1,12 +1,11 @@
 // 生成管线（orchestrator）：多候选生成 → 初评 → Best-of-N 筛选 → 反思改写（最多 2 轮）→ 终态
 //
-// 落地文档要求 + 2026-10-04 调研结论：
+// 落地文档要求 + 2026-10-05 明哥澄清：
 //   §6.2-E 反思改写循环（设最大轮次）
 //   §11.3 相似度指纹去重（生成结果与历史比对，超阈值重写）
 //   §11.8 质检参数化（软评分 <70 触发重写，最多 2 轮）
-//   Best-of-N（HF/ICLR 2025-26 趋势）：同等算力下「多采样 + 验证器重排」常优于
-//   纯自我修正 —— 内部生成 6 版（每角度 × 2 语气），质检后每角度只留最优 1 版，
-//   展示给用户的 3 版永远是筛过的，不是抽到的。
+//   三版 = 同一条文案的轻微改写（多账号防折叠）：内部生成 6 版轻微改写候选，
+//   质检后按分数取 3 版「互不完全相同」的展示——只拦复制粘贴级重复（阈值 0.99）。
 //
 // 改写采纳策略：只有「严格更优」才采纳重写稿（pass 状态 > 软评分 > 相似度），
 // 防止改写越改越差。所有 LLM 调用按版本并行，控制在可接受的时延内。
@@ -17,7 +16,17 @@ import { checkHardRules } from '../qa/ruleEngine.js';
 import { findSimilarVersions, getPreferredToneOrder, getToneSamples, textSimilarity } from '../memory/store.js';
 import { STYLE_EXEMPLARS } from '../knowledge/corpus.js';
 
-const SIM_THRESHOLD = 0.6;
+// 相似度阈值（2026-10-05 明哥两轮澄清后的最终口径）：
+// - SIM_REWRITE_THRESHOLD：新文案与历史文案相似度 ≥ 此值才触发重写（跨次「越寫越像」审美线）
+// - SIM_MUTUAL_MAX：同批三版两两相似度 ≥ 此值才算「几乎完全相同」。
+//   【明哥原话】三版只要不是 100% 相似就行，90% 几相似都 OK，替换几个词都行——
+//   唯一目的是避免三个微信号发完全一样的文本被微信折叠。故默认 0.99 = 只拦复制粘贴级重复。
+const envRatio = (name, def) => {
+  const v = Number(process.env[name]);
+  return Number.isFinite(v) && v > 0 && v <= 1 ? v : def;
+};
+const SIM_THRESHOLD = envRatio('SIM_REWRITE_THRESHOLD', 0.9);
+const MUTUAL_SIM_MAX = envRatio('SIM_MUTUAL_MAX', 0.99);
 const MAX_REWRITE_ROUNDS = 2;
 // 候选池大小：3 角度 × 2 语气 = 6；环境变量可调（演示模式固定 3）
 const CANDIDATE_COUNT = Math.max(3, Number(process.env.GENERATE_CANDIDATES) || 6);
@@ -52,7 +61,7 @@ export async function runPipeline({ text, vision, scene, angles }, io = {}) {
 
   const candidates = out.versions.map(v => ({
     ...v,
-    hardCheck: checkHardRules(v.text, { scene, userText: text, vision, imagePlan: out.imagePlan }),
+    hardCheck: checkHardRules(v.text, { scene, userText: text, vision }),
     score: null,
     similarity: 0,
     similarSample: '',
@@ -85,36 +94,20 @@ export async function runPipeline({ text, vision, scene, angles }, io = {}) {
     v.score = await doScore(v.text, { scene, angle: v.angle, tone: v.tone });
   }));
 
-  // ---- Best-of-N 筛选（2026-10-04 澄清后重构）----
-  // 三版 = 同一内容的三种写法（多账号分发防微信折叠）。
-  // 筛选标准：质检得分优先 + 三版彼此写法差异足够：
-  //   ① 整篇两两相似度 < 0.45（字面互异）
-  //   ② 收尾句两两不得雷同（祝福/收尾复读是视觉疲劳根源，单查整篇查不出）
-  //   ③ 写法标签互异（A/B/C 各一条）
-  const MUTUAL_SIM_MAX = 0.45;
-  const endingOf = t => {
-    const ls = String(t).trim().split('\n').filter(l => l.trim() && !/#\s*明哥中港牌/.test(l));
-    return ls[ls.length - 1] || '';
-  };
-  const distinct = (a, b) =>
-    textSimilarity(a.text, b.text) < MUTUAL_SIM_MAX &&
-    endingOf(a.text) !== endingOf(b.text) &&
-    textSimilarity(endingOf(a.text), endingOf(b.text)) < 0.7;
-  const pick = (c, sel) => sel.every(s => distinct(c, s)) && !sel.some(s => s.angle === c.angle);
-  const relax = (c, sel) => sel.every(s => textSimilarity(c.text, s.text) < MUTUAL_SIM_MAX);
+  // ---- Best-of-N 筛选（2026-10-05 明哥再次澄清后重构）----
+  // 三版 = 同一条文案的轻微改写（多账号分发防微信折叠）。
+  // 筛选只做两件事：
+  //   ① 质检得分优先（违规/低分靠后，选中后交反思改写）
+  //   ② 两两文本不得「几乎完全相同」（相似度 ≥ MUTUAL_SIM_MAX，默认 0.99）
+  // 不再要求换整体写法 / 收尾互异 / 写法标签互异——与「轻微改写」需求直接冲突，已废除。
+  const notDup = (c, sel) => sel.every(s => textSimilarity(c.text, s.text) < MUTUAL_SIM_MAX);
   const ranked = [...candidates].sort((a, b) => rankOf(b) - rankOf(a));
   const selected = [];
-  for (const c of ranked) { if (selected.length >= 3) break; if (pick(c, selected)) selected.push(c); }
-  // 放宽一：允许同标签（仍要求文本互异）
-  for (const c of ranked) { if (selected.length >= 3) break; if (!selected.includes(c) && relax(c, selected)) selected.push(c); }
-  // 放宽二：候选不足时如实凑数（宁少勿假，标签重复可接受）
-  for (const c of ranked) { if (selected.length >= 3) break; if (!selected.includes(c)) selected.push(c); }
-  // 按写法路径稳定排序展示（直述→觀點→白描）
-  const approaches = angles || [];
-  selected.sort((a, b) => {
-    const ia = approaches.indexOf(a.angle), ib = approaches.indexOf(b.angle);
-    return (ia === -1 ? 99 : ia) - (ib === -1 ? 99 : ib);
-  });
+  // 第一轮：只收质检通过的
+  for (const c of ranked) { if (selected.length >= 3) break; if (c.hardCheck.pass && notDup(c, selected)) selected.push(c); }
+  // 第二轮：不足 3 版时按排序继续凑（含违规稿，入选后交反思改写），
+  // 但仍不得与已选文本几乎完全相同——否则三个账号发出去照样折叠，宁可少给
+  for (const c of ranked) { if (selected.length >= 3) break; if (!selected.includes(c) && notDup(c, selected)) selected.push(c); }
   const versions = selected.slice(0, 3);
 
   // 反思改写循环
@@ -122,8 +115,10 @@ export async function runPipeline({ text, vision, scene, angles }, io = {}) {
     const idxs = versions.map((v, i) => i).filter(i => needsRewrite(versions[i]));
     if (!idxs.length) break;
 
-    await Promise.all(idxs.map(async i => {
-      const v = versions[i];
+    // 本轮基线快照：并行重写只读快照，不写 versions，避免互读半采纳状态（竞态修复 2026-10-05）
+    const snapshot = versions.slice();
+    const results = await Promise.all(idxs.map(async i => {
+      const v = snapshot[i];
       const feedback = {
         violations: v.hardCheck.violations.map(x => x.msg),
         score: v.score?.total != null
@@ -141,13 +136,13 @@ export async function runPipeline({ text, vision, scene, angles }, io = {}) {
       });
       if (!rewritten) {
         console.warn('[pipeline] rewrite 调用失败，保留原稿:', v.angle, v.tone);
-        return; // 重写失败保留原稿
+        return null; // 重写失败保留原稿
       }
 
       const cand = {
         ...v,
         text: rewritten,
-        hardCheck: checkHardRules(rewritten, { scene, userText: text, vision, imagePlan: out.imagePlan })
+        hardCheck: checkHardRules(rewritten, { scene, userText: text, vision })
       };
       const [score, sims2] = await Promise.all([
         doScore(rewritten, { scene, angle: v.angle, tone: v.tone }),
@@ -163,17 +158,20 @@ export async function runPipeline({ text, vision, scene, angles }, io = {}) {
           cand.similarSample = ex.slice(0, 60);
         }
       }
+      return { i, base: v, cand };
+    }));
 
-      // 防折叠防线（2026-10-04）：重写稿须与同批其他版本保持互异——
-      // 并行重写可能收敛到相近内容，两版雷同就失去了多账号分发的意义
-      const mutualOk = versions.every((o, j) => j === i || textSimilarity(rewritten, o.text) < MUTUAL_SIM_MAX);
-
-      // 仅当严格更优才采纳
-      if (rankOf(cand) > rankOf(v) && mutualOk) {
-        cand.rewrites = v.rewrites + 1;
+    // 采纳阶段串行：防折叠防线（2026-10-04）与「严格更优」判断基于实时 versions，
+    // 确保后采纳的稿不与已采纳稿雷同、且各自严格优于本轮原稿。
+    for (const r of results) {
+      if (!r) continue;
+      const { i, base, cand } = r;
+      const mutualOk = versions.every((o, j) => j === i || textSimilarity(cand.text, o.text) < MUTUAL_SIM_MAX);
+      if (rankOf(cand) > rankOf(base) && mutualOk) {
+        cand.rewrites = base.rewrites + 1;
         versions[i] = cand;
       }
-    }));
+    }
   }
 
   return { ...out, versions, candidateCount: candidates.length };

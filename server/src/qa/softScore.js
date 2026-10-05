@@ -88,9 +88,10 @@ ${text}
       { role: 'system', content: '你是严格独立的朋友圈文案评审，只输出 JSON，绝不美化分数。' },
       { role: 'user', content: prompt }
     ], {
-      max_tokens: 2500, // 推理模型：思考也计入 completion，复杂评审的思考可达千级 token
+      max_tokens: 4000, // 给足冗余（max_tokens 是上限不计费；关闭推理后实际用量远低于此）
       temperature: 0.2, // 评审要稳定，不要创造性
-      model
+      model,
+      label: 'score'
     });
     const s = parseScoreJson(raw);
     if (!s) return { skipped: true, total: null, reason: '评分解析失败' };

@@ -5,11 +5,10 @@
 // 因此绝对化用语不阻断，仅作 advisory 提示。
 //
 // ctx 参数（可选）：
-//   { scene, userText, vision, imagePlan }
+//   { scene, userText, vision }
 //     scene      —— 场景，用于场景相关规则（早安禁硬广 / 晒单完成态 / 虚构检测）
 //     userText   —— 用户原始输入，用于虚构检测（文案内容须能在原文找到依据）
-//     vision     —— 视觉识别结果，extracted.hasPII 用于打码提示
-//     imagePlan  —— 配图建议，用于打码提示校验
+//     vision     —— 视觉识别结果，type==='screenshot' 决定群聊内容是否有据
 
 import {
   HARD_RULES, CLICHE_BLACKLIST, POLITICAL_TERMS, ABSOLUTE_TERMS,
@@ -20,10 +19,15 @@ import {
 // ---- 价格 / 里程 / 车牌（繁简双写，文档 §5.2 一票否决）----
 // 【修复 2026-10-04】阿拉伯数字直跟「萬/万」的写法（88萬 / 88 萬 / 8萬公里）
 // 原先全部漏网——车源输入常带阿拉伯数字价格，LLM 回显时正是这种写法。
-const PRICE_LIKE = /(?:[¥$￥]\s*\d{1,3}(?:[,，]\s*\d{3})+|[¥$￥]\s*\d+\s*起|\d+(?:\.\d+)?\s*[萬万]|\d{5,}\s*(?:元|塊|块|蚊|RMB|HKD)|十萬|百萬|千萬|十万|百万|千万|[一二三四五六七八九十百千万]{1,3}萬|[一二三四五六七八九十百千万]{1,3}万)/;
+// 【修复 2026-10-05】「千萬/千万」作副词（如「千萬唔好急」）会被误判为价格：
+//   中文数字金额后若紧跟否定/意愿副词（唔/不/別/别/咪/勿/要），不判为价格。
+const PRICE_LIKE = /(?:[¥$￥]\s*\d{1,3}(?:[,，]\s*\d{3})+|[¥$￥]\s*\d+\s*起|\d+(?:\.\d+)?\s*[萬万]|\d{5,}\s*(?:元|塊|块|蚊|RMB|HKD)|[一二三四五六七八九十百千万]{1,4}[萬万](?![唔不別别咪勿要]))/;
 const MILEAGE_LIKE = /[\d,]+\s*[萬万]?\s*(?:公里|km|KM|千米|英里)/;
 // 真实车牌：粤Z·A1234 / 粤B12345 / 粵Z 88888（内地牌=汉字+字母+5位；港牌=2字母+4位）
 const PLATE_LIKE = /[粤粵][A-Z]\s*[·•]?\s*[A-Z0-9]{4,5}|[A-Z]{2}\s*[·•]?\s*\d{4}/;
+
+// 交车/交付语境：r-car-delivery-scope 只在此语境下适用（避免误伤正常选号/验车帖）
+const CAR_DELIVERY_INPUT = /交車|交车|提車|提车|交付|交咗部|交左部/;
 
 // 否定语境：可出现在口岸名前后（「早已唔受理」「已停批」）
 // 否定语境判定
@@ -68,7 +72,7 @@ export function checkHardRules(text, ctx = {}) {
   const violations = [];
   const warnings = [];
   const evaluated = new Set(); // 记录「已评估」的规则，而非「已触发」
-  const { scene, userText = '', vision = null, imagePlan = '' } = ctx;
+  const { scene, userText = '', vision = null } = ctx;
 
   const lines = String(text).split(/\r?\n/).map(l => l.trim()).filter(Boolean);
 
@@ -182,12 +186,13 @@ export function checkHardRules(text, ctx = {}) {
       ...[...text.matchAll(/[“]([^”]{1,200})[”]/g)].map(m => m[1]),
       ...[...text.matchAll(/['‘]([^'’]{1,200})['’]/g)].map(m => m[1])
     ];
+    // 【2026-10-05 明哥反馈后收紧】删除「≤5 字短应答一律放行」豁免——
+    // 该豁免本为容忍截图 OCR 漏字，实测成了虚构通道：「可以行得」（4字）、
+    // 「搞掂」（2字）这类编造引语全部免检通过。现在任何引语（去标点后非空）
+    // 都必须能在「依据语料」（用户原文 + 截图识别结果）里逐字找到，否则即违规。
     const unsupported = quotes.filter(q => {
       const norm = q.replace(/[^\w一-龥]/g, '');
-      if (norm.length < 3) return false;            // 1~2 字：极短口语，一律放行
-      // ≤5 字且不含评价/情感动词 -> 视为群聊短应答（搞掂/冇問題/OK咁/多謝）
-      const isShortReply = norm.length <= 5 && !FABRICATION_PATTERNS.some(p => new RegExp(p).test(q));
-      if (isShortReply) return false;
+      if (!norm) return false;                      // 纯标点/符号引号，无从查证
       return !evidence.includes(q) && !evidence.includes(norm);
     });
     // 独立必查，不再 else if 短路；命中词若在依据语料同样出现（含正则类模式），不算虚构。
@@ -217,12 +222,19 @@ export function checkHardRules(text, ctx = {}) {
     }
   }
 
-  // ---- r-mask-pii：含客户信息的截图须提示打码 ----
-  if (vision?.extracted?.hasPII === true) {
-    evaluated.add('r-mask-pii');
-    if (!/打碼|打码|遮蓋|遮挡|模糊/.test(imagePlan)) {
-      violations.push({ id: 'r-mask-pii', msg: '识别到截图含客户信息（头像/昵称/电话/车牌），配图建议须明确打码' });
-    }
+  // ---- r-group-screenshot：提及群聊必须以真实上传的群聊截图为据 ----
+  // 【2026-10-05 明哥反馈】两次实测翻车：没传图，文案编出「群裡最後一句
+  // 『可以行得。』」；传了截图，引用的「搞掂」也不是图里的原文。
+  // 规则：文案出现群聊字样时，必须存在有效识别的群聊截图，否则一律违规——
+  // 群聊反应/群消息不可能凭空存在。视觉识别降级（_degraded）同样视为无据。
+  evaluated.add('r-group-screenshot');
+  const GROUP_MARKERS = /群裡|群里|群組|群组|群内|群內|微信群|業務群|业务群|服務群|服务群|客戶群|客户群|聊天記錄|聊天记录/;
+  const hasScreenshot = !!(vision && !vision._degraded && vision.type === 'screenshot');
+  if (GROUP_MARKERS.test(text) && !hasScreenshot) {
+    violations.push({
+      id: 'r-group-screenshot',
+      msg: '文案提到群聊，但你没有提供群聊截图——群聊内容（群里反应/群消息）只能来自真实截图，未提供时一律不提群'
+    });
   }
 
   // ---- r-no-client-name：客户姓名/称呼不写入文案（2026-10-04 明哥硬要求，阻断）----
@@ -233,7 +245,14 @@ export function checkHardRules(text, ctx = {}) {
   if (vision?.description) {
     evaluated.add('r-no-client-name');
     const NAME_TOKEN = /[一-龥](?:生|太|姐)(?![一-龥])|[一-龥](?:小姐|先生|女士|老闆|老板)/g;
-    const srcTokens = [...new Set(String(vision.description).match(NAME_TOKEN) || [])];
+    // 非称呼的常见词（避免「學生/醫生/發生/養生」等被当作客户称呼误拦）
+    const NON_NAME = new Set([
+      '學生', '学生', '醫生', '医生', '先生', '太太', '小姐', '女士', '老闆', '老板',
+      '後生', '后生', '發生', '发生', '產生', '产生', '陌生', '女生', '男生', '師生', '师生',
+      '一生', '人生', '今生', '餘生', '余生', '衛生', '卫生', '養生', '养生', '留學生', '留学生'
+    ]);
+    const srcTokens = [...new Set(String(vision.description).match(NAME_TOKEN) || [])]
+      .filter(t => !NON_NAME.has(t));
     const leaked = srcTokens.filter(t => {
       const esc = t.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
       return new RegExp(esc).test(text) && !new RegExp(esc).test(userText);
@@ -264,24 +283,27 @@ export function checkHardRules(text, ctx = {}) {
     }
   }
 
-  // ---- r-port-unverified：口岸须与本次业务一致（仅提示）----
-  // 实测发现：模型会从知识库替本次成交「配」一个口岸（如凭空写蓮塘）。
-  // 口岸是本次成交的具体事实，与实际不符即事故。通用罗列（≥3 个口岸）视为介绍，不提示。
+  // ---- r-port-unverified：口岸须与本次业务一致（阻断，2026-10-05 明哥确认）----
+  // 实测发现：模型会从知识库/风格锚替本次成交「配」一个口岸（如凭空写蓮塘）。
+  // 口岸是本次成交的具体事实，与实际不符即事故——明哥口径：没有明确信息就追问
+  // 或拦截，绝不自行补。通用罗列（≥3 个口岸）视为介绍，不拦。
   if (scene === 'business') {
     evaluated.add('r-port-unverified');
     const portsMentioned = AVAILABLE_PORTS.filter(p => text.includes(p) && !evidenceAll.includes(p));
     const distinct = portsMentioned.filter(p => !portsMentioned.some(o => o !== p && o.includes(p)));
     if (distinct.length && distinct.length < 3) {
-      warnings.push({
+      violations.push({
         id: 'r-port-unverified',
-        msg: `口岸「${distinct.join('、')}」未在你提供的文字/图片中出现，请核实与本次业务实际口岸一致`
+        msg: `口岸「${distinct.join('、')}」未在你提供的文字/图片中出现——口岸属本次业务关键事实，不得虚构；未提供就删去口岸表述`
       });
     }
   }
 
   // ---- r-absolute-advisory：绝对化用语（仅提示，不阻断）----
   evaluated.add('r-absolute-advisory');
-  const absHit = ABSOLUTE_TERMS.filter(t => text.includes(t));
+  // 「第一」作序数（第一通電話/第一次/第一步/第一時間…）不是绝对化用语，避免误报
+  const FIRST_NON_SUPERLATIVE = /第一(?![通次步時时日月晚個个批輪轮份名位種种])/;
+  const absHit = ABSOLUTE_TERMS.filter(t => (t === '第一' ? FIRST_NON_SUPERLATIVE.test(text) : text.includes(t)));
   if (absHit.length) {
     warnings.push({
       id: 'r-absolute-advisory',
@@ -301,6 +323,66 @@ export function checkHardRules(text, ctx = {}) {
       id: 'r-drama',
       msg: `导演式镜头描写：${dramaHit.slice(0, 3).join('、')} —— 停顿/台词/表情多为脑补（§5.8 真实性），除非用户输入确有此事，否则请删除`
     });
+  }
+
+  // ---- r-car-delivery-scope：純購車交車帖不得添加兩地牌後續（2026-10-05 明哥業務反饋，阻斷）----
+  // 交車＝車輛交付，默認純購車，交付即完結；裝卡/選號/驗車屬兩地牌，除非用戶輸入/圖片確實提到。
+  // 仅当本次确实是「交车/交付」语境时才套用（選號/驗車本身是正常业务帖，不能误伤）
+  const deliveryCtx = CAR_DELIVERY_INPUT.test(userText)
+    || /交車|交车|交付|提車|提车/.test(String(vision?.extracted?.status || ''));
+  if ((scene === 'business' || scene === 'car') && deliveryCtx) {
+    evaluated.add('r-car-delivery-scope');
+    // 只拦「装卡」——它是用户明确指出的两地牌后续环节；验车/选号可能在交付前发生，不误伤
+    const followUp = ['裝卡', '装卡'];
+    const hit = followUp.filter(t => text.includes(t));
+    const grounded = /兩地牌|两地牌|牌/.test(evidenceAll) || followUp.some(t => evidenceAll.includes(t));
+    if (hit.length && !grounded) {
+      violations.push({
+        id: 'r-car-delivery-scope',
+        msg: `交車（純購車）交付即完結，不應添加兩地牌後續：${hit.join('、')}——裝卡/選號/驗車屬兩地牌環節`
+      });
+    }
+  }
+
+  // ---- r-visit-count：不寫客戶到場次數（2026-10-05 明哥反饋，僅提示）----
+  // 【2026-10-05 审计修正】原正则只认「兩隻手數／出現…次數／到場…次數」三种字面，
+  // 实测漏放率极高：「出現咗兩次」「嚟咗兩次」「到場三次」「一共出現兩次」全部放行。
+  // 现在补充「客户/佢/我哋… + 数量词 + 次」的通用计数句式。
+  // 保持 advisory（仅提示）：中文「次数」有正常用法（如「第二次交車」指第二辆车），
+  // 升为阻断会误伤，故按窄匹配补漏而非全面拦截。
+  if (scene === 'business' || scene === 'car') {
+    evaluated.add('r-visit-count');
+    const CN_NUM = '一|兩|两|三|四|五|六|七|八|九|十';
+    const ACTOR = '客戶|客户|佢|他|她|買家|买家|車主|车主';
+    const visitCount = new RegExp([
+      // 原三种
+      `(?:兩隻手|两只手)(?:數|数)`,
+      `出現[^。\\n]{0,10}次數`,
+      `到場[^。\\n]{0,8}次數`,
+      // 补漏：主体 + 「数量词 + 次」
+      `(?:${ACTOR})[^。\\n]{0,12}?(?:${CN_NUM}|\\d)\\s*次`,
+      // 补漏：「一共/總共/前後 + 数量词 + 次」
+      `(?:一共|總共|总共|前後|前后|前后)[^。\\n]{0,6}?(?:${CN_NUM}|\\d)\\s*次`
+    ].join('|')).test(text);
+    if (visitCount) {
+      warnings.push({ id: 'r-visit-count', msg: '不要寫客戶到場次數（買家甚至唔使親自到場），建議刪除具體次數' });
+    }
+  }
+
+  // ---- r-low-ending：交車/業務帖收尾不得用口頭禪/掃興告別（2026-10-05 明哥反饋，僅提示）----
+  if (scene === 'business' || scene === 'car') {
+    evaluated.add('r-low-ending');
+    const tail = String(text).trim().split(/\r?\n/).map(l => l.trim()).filter(Boolean)
+      .filter(l => !/#\s*明哥中港牌/.test(l)).pop() || '';
+    if (/路上見|路上见|各自返程|各自返家/.test(tail)) {
+      warnings.push({ id: 'r-low-ending', msg: `收尾「${tail}」偏低／掃興，交車帖建議用高級祝福或關係、前路意象` });
+    }
+  }
+
+  // ---- r-geo-hk：公司本部位於香港，不寫「客戶從香港過來」（2026-10-05 明哥反饋，僅提示）----
+  evaluated.add('r-geo-hk');
+  if (/從香港過來|从香港过来|從香港趕來|从香港赶来/.test(text)) {
+    warnings.push({ id: 'r-geo-hk', msg: '公司本部位於香港，香港客戶是本地客戶：不應寫「客戶從香港過來／趕來」' });
   }
 
   // ---- 如实报告：checked = 已评估规则数（不再虚报 HARD_RULES.length）----

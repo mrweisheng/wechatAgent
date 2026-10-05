@@ -26,7 +26,21 @@ import {
 
 const DATA_DIR = path.resolve(process.env.DATA_DIR || './data');
 const INTEL_FILE = path.join(DATA_DIR, 'intel.json');
+const META_FILE = path.join(DATA_DIR, 'intel-meta.json');
 const MAX_ITEMS = 1000;
+
+// 推送可观测性：lastPushAt 独立于条目归档记录——外部 Agent 推来一整批
+// 全是重复项时（每天推同批旧闻是常态），若只看 items[0].ingestedAt，
+// 会误报「Agent 没在推送」。恰恰在这个场景下指标必须如实。
+async function recordPushMeta(source, at) {
+  try {
+    await fs.mkdir(DATA_DIR, { recursive: true });
+    await fs.writeFile(META_FILE, JSON.stringify({
+      lastPushAt: at,
+      lastPushSource: String(source || 'external-agent').slice(0, 50)
+    }), 'utf8');
+  } catch { /* 可观测性写失败不影响主流程 */ }
+}
 
 async function loadAll() {
   try {
@@ -36,18 +50,25 @@ async function loadAll() {
     return Array.isArray(parsed) ? parsed : [];
   } catch (e) {
     if (e.code !== 'ENOENT') {
-      // 文件损坏：备份后重建，不静默覆盖
+      // 文件损坏：备份后重建，不静默覆盖。用 copyFile 而非 rename——
+      // rename 失败被吞掉时，下一次 saveAll 会把唯一可恢复的原始数据覆盖掉
       const bak = INTEL_FILE + '.corrupt-' + Date.now();
-      await fs.rename(INTEL_FILE, bak).catch(() => {});
+      await fs.copyFile(INTEL_FILE, bak).catch(() => {});
       console.warn('[intel] intel.json 损坏，已备份至', bak);
     }
     return [];
   }
 }
 
+// 推送可能并发到达（外部 Agent 重试 / 与 /api/intel/run 同时触发），
+// 「读→改→写」不加互斥会互相覆盖：轻则丢整批入库，重则共享 .tmp 被
+// 对方 rename 走后 rename 抛 ENOENT 直接 500。模块级 Promise 链串行化。
+let ingestChain = Promise.resolve();
+
 async function saveAll(items) {
   await fs.mkdir(DATA_DIR, { recursive: true });
-  const tmp = INTEL_FILE + '.tmp';
+  // tmp 文件名唯一化：共享 .tmp 在并发下会被另一个写方覆盖/抢走
+  const tmp = `${INTEL_FILE}.tmp-${process.pid}-${Math.random().toString(36).slice(2, 8)}`;
   await fs.writeFile(tmp, JSON.stringify(items, null, 2), 'utf8');
   await fs.rename(tmp, INTEL_FILE); // 原子写，避免半截文件
 }
@@ -91,17 +112,26 @@ export function detectStaleTitle(title, now = new Date()) {
 }
 
 /**
- * 接收入库
+ * 接收入库（并发安全：模块级互斥串行化，见 ingestChain）
  * @param body { source, items: [{title, url, snippet, publishedAt}] }
  * @returns { accepted, received, added, rejected, verified, reasons }
  */
-export async function ingestIntel(body = {}) {
+export function ingestIntel(body = {}) {
+  const run = ingestChain.then(() => doIngest(body));
+  ingestChain = run.catch(() => { /* 链上吞错，防止一次失败毒化后续所有推送 */ });
+  return run;
+}
+
+async function doIngest(body = {}) {
   const items = Array.isArray(body.items) ? body.items : [];
   const reasons = [];
 
   if (!items.length) {
     return { accepted: false, received: 0, added: 0, rejected: 0, verified: 0, reasons: ['items 为空'] };
   }
+
+  // 无论入库结果如何，推送动作本身先记录（可观测性）
+  await recordPushMeta(body.source, new Date().toISOString());
 
   const existing = await loadAll();
   const seen = new Set(existing.map(i => norm(i.url) || norm(i.title)));
@@ -117,9 +147,17 @@ export async function ingestIntel(body = {}) {
 
   const accepted = [];
   let rejected = 0;
+
+  // 单次推送上限：超出部分如实计入 rejected，不让外部 Agent 误以为都被去重了
+  const INCOMING_CAP = 200;
+  const incoming = items.slice(0, INCOMING_CAP);
+  if (items.length > INCOMING_CAP) {
+    rejected += items.length - INCOMING_CAP;
+    reasons.push(`超出单次推送上限 ${INCOMING_CAP} 条，截断 ${items.length - INCOMING_CAP} 条`);
+  }
   const nowTs = Date.now();
 
-  for (const raw of items.slice(0, 200)) {
+  for (const raw of incoming) {
     const title = String(raw?.title || '').trim().slice(0, 200);
     const url = String(raw?.url || '').trim().slice(0, 500);
     const snippet = String(raw?.snippet || '').trim().slice(0, 800);
@@ -147,7 +185,16 @@ export async function ingestIntel(body = {}) {
       continue;
     }
 
-    if (seen.has(norm(url)) || seen.has(norm(title))) { continue; } // 去重（非拒绝）
+    if (seen.has(norm(url)) || seen.has(norm(title))) {
+      // 同题异源：不再重复归档，但新来源的 host 计入交叉核实，
+      // 让已归档的同主题条目能升级为 verified（否则永远单源待核）
+      if (!seen.has(norm(url))) {
+        const h = hostOf(url);
+        const k = topicKey(title);
+        if (h && k && topicHosts.has(k)) topicHosts.get(k).add(h);
+      }
+      continue; // 去重（非拒绝）
+    }
 
     seen.add(norm(url));
     seen.add(norm(title));
@@ -164,15 +211,23 @@ export async function ingestIntel(body = {}) {
   }
 
   // ---- 多源交叉核实：同主题 ≥2 个独立白名单 host -> verified ----
+  // 同批新增与已归档条目统一判定：老条目在第二来源到达后也能升级
   let verified = 0;
-  for (const a of accepted) {
-    const k = topicKey(a.title);
-    if (!k) continue;
+  const markVerified = entry => {
+    const k = topicKey(entry.title);
+    if (!k) return;
     if (!topicHosts.has(k)) topicHosts.set(k, new Set());
     const hosts = topicHosts.get(k);
-    if (a.host) hosts.add(a.host);
-    a.verified = hosts.size >= 2;
-    if (a.verified) verified++;
+    if (entry.host) hosts.add(entry.host);
+    entry.verified = hosts.size >= 2;
+    if (entry.verified) verified++;
+  };
+  for (const a of accepted) markVerified(a);
+  for (const it of existing) {
+    if (it.verified) continue;
+    const before = it.verified;
+    markVerified(it);
+    if (!before && it.verified) verified++; // 老条目升级
   }
 
   const merged = [...accepted, ...existing];
@@ -199,8 +254,13 @@ export async function intelStats() {
   } catch {
     items = [];
   }
-  const latest = items[0] || null; // merged 时新条目在前
   const token = (process.env.INTEL_PUSH_TOKEN || '').trim();
+  // lastPush 以独立 meta 记录为准（全重复推送也如实更新）；无 meta 时回落归档条目
+  let lastPush = null;
+  try {
+    lastPush = JSON.parse(await fs.readFile(META_FILE, 'utf8'));
+  } catch { /* 无 meta 文件，回落 */ }
+  const latest = items[0] || null; // merged 时新条目在前
   return {
     sources: SOURCE_WHITELIST.map(s => ({ name: s.name, domains: s.domains })),
     file: INTEL_FILE,
@@ -208,8 +268,8 @@ export async function intelStats() {
     pushEnabled: !!token && !/REPLACE/.test(token),
     total: items.length,
     verified: items.filter(i => i.verified).length,
-    lastPushAt: latest?.ingestedAt || null,
-    lastPushSource: latest?.via || null
+    lastPushAt: lastPush?.lastPushAt || latest?.ingestedAt || null,
+    lastPushSource: lastPush?.lastPushSource || latest?.via || null
   };
 }
 
