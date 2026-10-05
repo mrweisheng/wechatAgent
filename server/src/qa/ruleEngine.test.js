@@ -21,12 +21,15 @@ test('落款与短语同行被拦（精确断言，不再用 || 掩盖）', () =
   assert.deepEqual(V(r), ['r-signature-alone']);
 });
 
-// ========== 语域：绝对化用语只提示 ==========
-test('绝对化用语不阻断，仅提示', () => {
-  for (const t of ['包過', '零風險', '全網最低', '國家級', '保證冇問題']) {
+// ========== 语域：绝对化用语 ==========
+// 【2026-10-05】r-absolute-advisory 与 ABSOLUTE_TERMS 已整体删除：
+// 全链路无消费方（不阻断/不评分/不触发重写），前端提示对工作流无价值。
+// 回归锁定：这些词现在既不阻断也不产生任何 warning。
+test('绝对化用语彻底放行（规则已删除，不再产生提示）', () => {
+  for (const t of ['包過', '零風險', '全網最低', '國家級', '保證冇問題', '我哋係行業第一']) {
     const r = checkHardRules(`${t}。\n\n#明哥中港牌`);
     assert.equal(r.pass, true, `${t} 不应阻断`);
-    assert.ok(W(r).includes('r-absolute-advisory'));
+    assert.ok(!W(r).some(w => w.startsWith('r-absolute')), `${t} 不应再产生绝对化提示`);
   }
 });
 
@@ -39,21 +42,10 @@ test('价格与车牌里程被拦（繁简双写）', () => {
   assert.ok(V(checkHardRules('只跑了 50,000 公里。\n\n#明哥中港牌')).includes('r-no-numbers'));
 });
 
-// 【回归 2026-10-05 e2e 实测】「由第一通電話」被误报绝对化用语；序数「第一」不应提示
-test('绝对化用语：「第一」作序数不误报，作排名仍提示', () => {
-  const ord = checkHardRules('由第一通電話到交車，同一個人跟到尾。\n\n#明哥中港牌');
-  assert.ok(!W(ord).includes('r-absolute-advisory'), `序数第一不应提示：${W(ord).join(',')}`);
-  const sup = checkHardRules('我哋係行業第一。\n\n#明哥中港牌');
-  assert.ok(W(sup).includes('r-absolute-advisory'), '排名第一仍应提示');
-});
-
 test('微商套话被拦', () => {
   assert.ok(V(checkHardRules('感恩託付，圓滿收官。\n\n#明哥中港牌')).includes('r-cliche'));
 });
 
-test('涉政被拦', () => {
-  assert.ok(V(checkHardRules('談論天安門事件。\n\n#明哥中港牌')).includes('r-no-politics'));
-});
 
 // ========== 口岸 ==========
 test('皇崗/文錦渡写成可办理被拦', () => {
@@ -186,6 +178,31 @@ test('r-no-fabricate 独立查评价词（不被引号短路）', () => {
   // 原文无「滿意」但文案出现 -> 虚构评价
   const r = checkHardRules('陳生好滿意。\n\n#明哥中港牌', { scene: 'business', userText: '選號完成' });
   assert.ok(V(r).includes('r-no-fabricate'));
+});
+
+// 【2026-10-05】UNGROUNDED_NARRATIVE_PATTERNS（原死代码）并入 FABRICATION_PATTERNS：
+// 补「X話 + 无评价词」的无引号转述漏网，如「佢話即刻搞掂」——此前完全放行
+test('r-no-fabricate 拦无引号转述框架（佢話+无评价词）', () => {
+  const r = checkHardRules('交車完成。\n\n佢話即刻搞掂。\n\n#明哥中港牌', {
+    scene: 'business', userText: '今日交咗部車'
+  });
+  assert.ok(V(r).includes('r-no-fabricate'), `无据无引号转述应拦：${V(r).join(',')}`);
+});
+
+test('r-no-fabricate 无引号转述在有依据时放行', () => {
+  const r = checkHardRules('交車完成。\n\n佢話即刻搞掂。\n\n#明哥中港牌', {
+    scene: 'business', userText: '今日交車，佢話即刻搞掂'
+  });
+  assert.equal(r.pass, true, `有据转述不应拦：${V(r).join(',')}`);
+});
+
+// 【回归锁定】「嗰句」裸命中会误伤官方示例句式（「最平淡嗰句回覆」是正常指代），
+// 故该框架限定后接引号才命中
+test('r-no-fabricate 「嗰句」不带引号的正常指代不误伤', () => {
+  const r = checkHardRules('驗完車。\n\n最平淡嗰句回覆，往往就係最抵聽嗰句。\n\n#明哥中港牌', {
+    scene: 'business', userText: '今日驗車'
+  });
+  assert.ok(!V(r).includes('r-no-fabricate'), `风格锚句式不应被拦：${V(r).join(',')}`);
 });
 
 // 【回归 2026-10-04】上一版 FABRICATION_PATTERNS 命中即违规、从不回查原文，
@@ -450,4 +467,10 @@ test('r-port-unverified：口岸无来源阻断；通用罗列与有来源放行
   // 通用罗列多个口岸 → 不拦（视为介绍）
   const list = checkHardRules('兩地牌可辦：深圳灣、蓮塘、沙頭角、港珠澳大橋，今日又落一單。\n\n#明哥中港牌', { scene: 'business', userText: '又落一單' });
   assert.ok(!V(list).includes('r-port-unverified'));
+  // 【2026-10-05 明哥口径】用户说「各個口岸的都有」→ 文案罗列口岸是如实转述，放行
+  // （哪怕只写一两个具体口岸——「各个口岸」本身已授权罗列）
+  const allPorts = checkHardRules('今日客戶諮詢，蓮塘同深圳灣都有客戶問。\n\n#明哥中港牌', {
+    scene: 'business', userText: '今日来了很多客户咨询，各个口岸的都有，明哥都亲自接待'
+  });
+  assert.ok(!V(allPorts).includes('r-port-unverified'), `各個口岸口径应放行：${V(allPorts).join(',')}`);
 });

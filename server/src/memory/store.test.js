@@ -31,14 +31,8 @@ test('版本级去重：相同输出 vs 历史输出应强命中（上一版拿�
   assert.ok(r2.sim < 0.6);
 });
 
-test('反馈回填：被选中的语气排前面（M2 回填）', async () => {
-  await store.recordFeedback({ kind: 'pick', payload: { scene: 'car', index: 0, angle: '對比', tone: '極簡留白' } });
-  await store.recordFeedback({ kind: 'pick', payload: { scene: 'car', index: 1, angle: '立場', tone: '極簡留白' } });
-  await store.recordFeedback({ kind: 'edit', payload: { scene: 'car', tone: '簡約克制' } }); // edit 不计入
-  const order = await store.getPreferredToneOrder();
-  assert.equal(order[0], '極簡留白');
-  assert.equal(order.length, 3);
-});
+// 【2026-10-05】getPreferredToneOrder 已随三档语气机制删除：三版=同一文案轻微改写后，
+// 语气档不复存在，反馈回填语气的机制一并移除。
 
 test('语气资产库：选中且通过硬规则的正文沉淀为样本（M2 §6.2-B）', async () => {
   const A = '號碼定咗。\n\n群裡一句「搞掂」，\n背後成個流程安安穩穩。\n\n#明哥中港牌';

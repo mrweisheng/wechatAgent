@@ -13,7 +13,7 @@
 import { generate, rewriteVersion } from './generator.js';
 import { scoreVersion, SOFT_PASS } from '../qa/softScore.js';
 import { checkHardRules } from '../qa/ruleEngine.js';
-import { findSimilarVersions, getPreferredToneOrder, getToneSamples, textSimilarity } from '../memory/store.js';
+import { findSimilarVersions, getToneSamples, textSimilarity } from '../memory/store.js';
 import { STYLE_EXEMPLARS } from '../knowledge/corpus.js';
 
 // 相似度阈值（2026-10-05 明哥两轮澄清后的最终口径）：
@@ -45,19 +45,18 @@ function rankOf(v) {
     - (v.similarity ?? 0);
 }
 
-export async function runPipeline({ text, vision, scene, angles }, io = {}) {
+export async function runPipeline({ text, vision, scene }, io = {}) {
   const doGenerate = io.generate || generate;
   const doRewrite = io.rewrite || rewriteVersion;
   const doScore = io.score || scoreVersion;
   const doSimilar = io.similar || findSimilarVersions;
 
-  // 反馈回填（M2）：最常被「選中此版」的语气排前面
-  const tones = io.tones || await getPreferredToneOrder();
-  // 语气资产库（§6.2-B）：明哥选中过的历史样本作为 few-shot，并纳入防照抄比对
+  // 语气资产库（§6.2-B）：明哥选中过的历史样本作为 few-shot，并纳入防照抄比对。
+  // 注：三版已是「同一文案轻微改写」，不再有语气档轮换；tones/angles 参数已废除。
   const toneSamples = io.toneSamples || await getToneSamples(scene);
   const wantCandidates = io.candidateCount || CANDIDATE_COUNT;
   // demo 模式（未配 key）生成层只会给 3 版，这里不强求 6
-  const out = await doGenerate({ text, vision, scene, angles, tones, toneSamples, versionCount: wantCandidates });
+  const out = await doGenerate({ text, vision, scene, toneSamples, versionCount: wantCandidates });
 
   const candidates = out.versions.map(v => ({
     ...v,
@@ -129,13 +128,13 @@ export async function runPipeline({ text, vision, scene, angles }, io = {}) {
           : null
       };
       const rewritten = await doRewrite({
-        text: v.text, scene, angle: v.angle, tone: v.tone,
+        text: v.text, scene,
         userText: text, vision, feedback,
         avoidSample: v.similarity >= SIM_THRESHOLD ? v.similarSample : null,
         toneSamples
       });
       if (!rewritten) {
-        console.warn('[pipeline] rewrite 调用失败，保留原稿:', v.angle, v.tone);
+        console.warn('[pipeline] rewrite 调用失败，保留原稿');
         return null; // 重写失败保留原稿
       }
 
@@ -145,7 +144,7 @@ export async function runPipeline({ text, vision, scene, angles }, io = {}) {
         hardCheck: checkHardRules(rewritten, { scene, userText: text, vision })
       };
       const [score, sims2] = await Promise.all([
-        doScore(rewritten, { scene, angle: v.angle, tone: v.tone }),
+        doScore(rewritten, { scene }),
         doSimilar([rewritten])
       ]);
       cand.score = score;

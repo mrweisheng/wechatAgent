@@ -4,7 +4,6 @@
 
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import { TONE_PRESETS } from '../knowledge/corpus.js';
 
 const DATA_DIR = path.resolve(process.env.DATA_DIR || './data');
 await fs.mkdir(DATA_DIR, { recursive: true });
@@ -140,20 +139,6 @@ export async function recordFeedback(payload) {
   cur.unshift({ ...payload, at: new Date().toISOString() });
   cur.splice(500);
   await writeJson(FILES.feedback, cur);
-}
-
-/**
- * 反馈回填（M2 §6.2-G）：统计被「選中此版」的语气档，按选中次数降序排列。
- * 生成时把最常被选中的语气排前面 —— 用户用脚投票的结果直接影响下一批产出。
- */
-export async function getPreferredToneOrder() {
-  const fb = await readJson(FILES.feedback, []);
-  const counts = new Map(TONE_PRESETS.map(t => [t.name, 0]));
-  for (const f of fb) {
-    const tone = f?.payload?.tone;
-    if (f?.kind === 'pick' && counts.has(tone)) counts.set(tone, counts.get(tone) + 1);
-  }
-  return [...TONE_PRESETS].sort((a, b) => counts.get(b.name) - counts.get(a.name)).map(t => t.name);
 }
 
 // ========== 纠错库（文档 6.2-G）============

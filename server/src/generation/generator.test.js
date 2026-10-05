@@ -5,8 +5,6 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { parseOutput } from '../generation/generator.js';
 
-const ANGLES = ['細節特寫', '群聊引用', '時間場景'];
-const TONES = ['沉穩質感', '簡約克制', '極簡留白'];
 const TAIL = '\n\nIMAGE_PLAN: 拍車頭 3/4 角度\nSCENE_NOTES: 因為交車';
 
 const V1 = 'VERSION_1\n正文一甲。\n\n#明哥中港牌';
@@ -15,7 +13,7 @@ const V3 = 'VERSION_3\n正文三丙。\n\n#明哥中港牌';
 
 function expect3(name, content) {
   test(name, () => {
-    const r = parseOutput(content, ANGLES, TONES, 'car');
+    const r = parseOutput(content, 'car');
     assert.equal(r.parseFailed, undefined, '不应标记解析失败');
     assert.equal(r.versions.length, 3, '应解析出 3 版');
     assert.equal(new Set(r.versions.map(v => v.text)).size, 3, '三版内容不应重复');
@@ -49,43 +47,40 @@ expect3('IMAGE_PLAN 置于最前',
   `IMAGE_PLAN: 拍車頭\nSCENE_NOTES: 理由\n\n${V1}\n\n---\n${V2}\n\n---\n${V3}`);
 
 test('仅返回 1 版时显式失败，不静默复制', () => {
-  const r = parseOutput('VERSION_1\n只有一版。\n\n#明哥中港牌', ANGLES, TONES, 'car');
+  const r = parseOutput('VERSION_1\n只有一版。\n\n#明哥中港牌', 'car');
   assert.equal(r.parseFailed, true);
   assert.equal(r.versions.length, 1, '不应复制成 3 版');
   assert.match(r.parseNote, /1\/3/);
 });
 
-test('tone 正确回填', () => {
-  const r = parseOutput(`${V1}\n\n---\n${V2}\n\n---\n${V3}`, ANGLES, TONES, 'car');
-  assert.deepEqual(r.versions.map(v => v.tone), TONES);
+test('版本不再携带 angle/tone 标签（三版=同一文案轻微改写，2026-10-05）', () => {
+  const r = parseOutput(`${V1}\n\n---\n${V2}\n\n---\n${V3}`, 'car');
+  for (const v of r.versions) {
+    assert.equal(v.angle, undefined, 'angle 标签应已废除');
+    assert.equal(v.tone, undefined, 'tone 标签应已废除');
+  }
 });
 
 test('sceneNotes 正确抽离；IMAGE_PLAN 已废弃（剥离正文、不再返回）', () => {
   // 【2026-10-05 明哥澄清】配图 = 用户自己上传的图，配图指引整体移除。
   // 模型若仍输出 IMAGE_PLAN，须被剥离、不进正文、也不回落默认模板。
-  const r = parseOutput(`${V1}\n\n---\n${V2}\n\n---\n${V3}${TAIL}`, ANGLES, TONES, 'car');
+  const r = parseOutput(`${V1}\n\n---\n${V2}\n\n---\n${V3}${TAIL}`, 'car');
   assert.match(r.sceneNotes, /因為交車/);
   assert.equal(r.imagePlan, undefined);
   assert.ok(!JSON.stringify(r.versions).includes('拍車頭'), 'IMAGE_PLAN 内容不得混入版本正文');
 });
 
 test('缺失 SCENE_NOTES 时为空串，不影响版本', () => {
-  const r = parseOutput(`${V1}\n\n---\n${V2}\n\n---\n${V3}`, ANGLES, TONES, 'car');
+  const r = parseOutput(`${V1}\n\n---\n${V2}\n\n---\n${V3}`, 'car');
   assert.equal(r.sceneNotes, '');
 });
 
-// Best-of-N：6 版候选时按 maxVersions 完整保留，角度/语气组合正确
-test('parseOutput maxVersions=6：取满 6 版，后 3 版同角度换语气', () => {
+// Best-of-N：6 版候选时按 maxVersions 完整保留
+test('parseOutput maxVersions=6：取满 6 版', () => {
   const mk = i => `版本${i}。\n\n#明哥中港牌`;
   const content = Array.from({ length: 6 }, (_, i) => `VERSION_${i + 1}\n${mk(i)}`).join('\n---\n')
     + '\n\nIMAGE_PLAN: 測試\nSCENE_NOTES: 測試';
-  const angles = ['細節特寫', '群聊引用', '時間場景'];
-  const tones = ['沉穩質感', '簡約克制', '極簡留白'];
-  const r = parseOutput(content, angles, tones, 'business', 6);
+  const r = parseOutput(content, 'business', 6);
   assert.equal(r.versions.length, 6);
-  assert.equal(r.versions[0].angle, '細節特寫');
-  assert.equal(r.versions[3].angle, '細節特寫', '第 4 版回到第一角度');
-  assert.equal(r.versions[0].tone, '沉穩質感');
-  assert.equal(r.versions[3].tone, '簡約克制', '后半池换第二语气');
   assert.equal(r.parseFailed, undefined);
 });

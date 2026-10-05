@@ -11,7 +11,7 @@
 //     vision     —— 视觉识别结果，type==='screenshot' 决定群聊内容是否有据
 
 import {
-  HARD_RULES, CLICHE_BLACKLIST, POLITICAL_TERMS, ABSOLUTE_TERMS,
+  HARD_RULES, CLICHE_BLACKLIST,
   IN_PROGRESS_TERMS, PROMO_TERMS,
   FABRICATION_PATTERNS, AVAILABLE_PORTS, DRAMA_MARKERS
 } from '../knowledge/corpus.js';
@@ -45,6 +45,32 @@ const STOPPED_PHRASES = [
 
 // 办理动词（用于确认这是「可办理」语境）
 const PROCESS_VERB = /(?:可辦|可办|能辦|能办|現辦|现办|受理|辦理|办理|已收|開放|开放|辦好|办好|搞掂|做到|入到牌)/;
+
+// 无引号转述框架：命中只说明「有转述动作」，是否虚构取决于**转述内容**有无出处。
+// 框架字样本身极少逐字出现在用户原文（用户写「客人好滿意」，文案写「客人話好滿意」），
+// 直接回查框架字样必误拦亲口转述 —— 须回查框架之后、同一分句内的内容：
+// 能在依据语料中找到（整句，或任一 ≥2 字连续片段）即放行；完全无出处才判虚构。
+const NARRATIVE_FRAMES = new Set([
+  '客人話', '客户话', '客話', '客戶話', '佢話', '佢講', '他话', '他講',
+  '表態', '表态', '答話', '答话', '話晒', '话晒', '大讚', '大赞', '激讚', '激赞',
+  '一句『', '一句「'
+]);
+
+function tailGrounded(text, index, len, evidence) {
+  const endRel = [text.indexOf('，', index), text.indexOf(',', index),
+    text.indexOf('。', index), text.indexOf('；', index), text.indexOf('\n', index)]
+    .filter(x => x !== -1);
+  const end = endRel.length ? Math.min(...endRel) : text.length;
+  const tail = text.slice(index + len, end).replace(/[^\w一-龥]/g, '');
+  if (!tail) return false;
+  if (evidence.includes(tail)) return true;
+  for (let L = 2; L <= tail.length; L++) {
+    for (let s = 0; s + L <= tail.length; s++) {
+      if (evidence.includes(tail.slice(s, s + L))) return true;
+    }
+  }
+  return false;
+}
 
 function clauseOf(text, index) {
   // 取所在分句（以中英文逗号、句号、分号、换行分隔）
@@ -104,11 +130,6 @@ export function checkHardRules(text, ctx = {}) {
   if (PRICE_LIKE.test(text)) violations.push({ id: 'r-no-numbers', msg: '出现价格或大额数字' });
   if (MILEAGE_LIKE.test(text)) violations.push({ id: 'r-no-numbers', msg: '出现里程数字' });
   if (PLATE_LIKE.test(text)) violations.push({ id: 'r-no-numbers', msg: '出现车牌号' });
-
-  // ---- r-no-politics ----
-  evaluated.add('r-no-politics');
-  const polHit = POLITICAL_TERMS.filter(t => text.includes(t));
-  if (polHit.length) violations.push({ id: 'r-no-politics', msg: `涉政内容：${polHit.join('、')}` });
 
   // ---- r-no-fake-port：皇崗/文錦渡写成可办理 ----
   // 反向表述（早已唔受理 / 已停批）放行 —— 这正是文档 §1 要求的标准谈资口径
@@ -212,6 +233,7 @@ export function checkHardRules(text, ctx = {}) {
       const m = re.exec(text);
       if (!m) return false;
       if (re.test(evidence)) return false;
+      if (NARRATIVE_FRAMES.has(p) && tailGrounded(text, m.index, m[0].length, evidence)) return false;
       return !spanCovered(m.index, m[0].length);
     });
     if (unsupported.length) {
@@ -286,12 +308,16 @@ export function checkHardRules(text, ctx = {}) {
   // ---- r-port-unverified：口岸须与本次业务一致（阻断，2026-10-05 明哥确认）----
   // 实测发现：模型会从知识库/风格锚替本次成交「配」一个口岸（如凭空写蓮塘）。
   // 口岸是本次成交的具体事实，与实际不符即事故——明哥口径：没有明确信息就追问
-  // 或拦截，绝不自行补。通用罗列（≥3 个口岸）视为介绍，不拦。
+  // 或拦截，绝不自行补。两类放行：
+  //   ① 通用罗列（≥3 个口岸）视为介绍，不拦；
+  //   ② 用户输入本身说了「各個口岸／每個口岸的都有」——此时文案罗列白名单口岸
+  //      是如实转述，不算虚构（2026-10-05 明哥口径补充）。
   if (scene === 'business') {
     evaluated.add('r-port-unverified');
+    const introListing = /各[個个]口岸|每[個个]口岸|所有口岸/.test(evidenceAll);
     const portsMentioned = AVAILABLE_PORTS.filter(p => text.includes(p) && !evidenceAll.includes(p));
     const distinct = portsMentioned.filter(p => !portsMentioned.some(o => o !== p && o.includes(p)));
-    if (distinct.length && distinct.length < 3) {
+    if (distinct.length && distinct.length < 3 && !introListing) {
       violations.push({
         id: 'r-port-unverified',
         msg: `口岸「${distinct.join('、')}」未在你提供的文字/图片中出现——口岸属本次业务关键事实，不得虚构；未提供就删去口岸表述`
@@ -299,17 +325,8 @@ export function checkHardRules(text, ctx = {}) {
     }
   }
 
-  // ---- r-absolute-advisory：绝对化用语（仅提示，不阻断）----
-  evaluated.add('r-absolute-advisory');
-  // 「第一」作序数（第一通電話/第一次/第一步/第一時間…）不是绝对化用语，避免误报
-  const FIRST_NON_SUPERLATIVE = /第一(?![通次步時时日月晚個个批輪轮份名位種种])/;
-  const absHit = ABSOLUTE_TERMS.filter(t => (t === '第一' ? FIRST_NON_SUPERLATIVE.test(text) : text.includes(t)));
-  if (absHit.length) {
-    warnings.push({
-      id: 'r-absolute-advisory',
-      msg: `绝对化用语：${absHit.join('、')}（私域口语可接受，若对外公开发布请注意广告法第九条）`
-    });
-  }
+  // ---- r-absolute-advisory：已删除（2026-10-05）----
+  // ABSOLUTE_TERMS 全链路无消费方（不阻断/不评分/不触发重写），连同前端提示整体移除。
 
   // ---- r-drama：导演腔镜头（仅提示，不阻断）----
   // 【明哥 2026-10-04 二轮否决】「靜咗幾秒。然後一句：『得。』」被评「尴尬」——

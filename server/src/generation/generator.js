@@ -8,7 +8,7 @@
 // 5. 事实红线（2026-10-05 明哥确认）：文案中每个事实细节（口岸/群聊/引语/时间）
 //    只能来自用户文字或图片，没有就不写——缺关键信息由感知层追问或规则层拦截
 
-import { TONE_PRESETS, STYLE_EXEMPLARS, TONE_ANTI_PATTERNS, SERVICE_DETAIL_HINTS } from '../knowledge/corpus.js';
+import { STYLE_EXEMPLARS, TONE_ANTI_PATTERNS, SERVICE_DETAIL_HINTS } from '../knowledge/corpus.js';
 import { retrieveKnowledge } from '../perception/vision.js';
 import { findCorrections } from '../memory/store.js';
 import { llmChat, llmKeyUsable } from '../llm/client.js';
@@ -143,23 +143,10 @@ function exemplarBlockOf(scene, toneSamples = []) {
   return block;
 }
 
-// 版本 i 的（写法, 语气）组合：
-// - 写法标签（寫法 A/B/C）只是展示序号，不再代表不同叙事路径（2026-10-05 明哥澄清：
-//   三版 = 同一文案的轻微改写，差异只来自措辞，不换角度不加料）
-// - 语气档仍逐版轮换，作为候选池的自然变化来源，由质检筛选
-function comboOf(i, approaches, tones, versionCount) {
-  const a = approaches[i % approaches.length];
-  const t = tones[versionCount > approaches.length
-    ? Math.floor(i / approaches.length) % tones.length
-    : i % tones.length];
-  return { a, t };
-}
-
-function buildPrompt({ text, vision, scene, angles, tones, knowledge, corrections, toneSamples, versionCount = 3 }) {
-  const combos = Array.from({ length: versionCount }, (_, i) => {
-    const { a, t } = comboOf(i, angles, tones, versionCount);
-    return `${i + 1}. ${a} × ${t}`;
-  }).join('\n');
+// 【2026-10-05 最终口径】三版 = 同一条文案的措辞级轻微改写（多账号分发防微信折叠）。
+// 不再给每版分配「写法 × 语气」组合——旧 comboOf 把语气档逐版轮换写进 prompt，
+// 与「语气保持一致」自相矛盾；版本也不再携带 angle/tone 标签。
+function buildPrompt({ text, vision, scene, knowledge, corrections, toneSamples, versionCount = 3 }) {
   const versionBlocks = Array.from({ length: versionCount }, (_, i) =>
     `VERSION_${i + 1}\n<文案正文，含落款>`
   ).join('\n\n---\n');
@@ -182,8 +169,7 @@ ${factBlockOf(knowledge)}
 - 严禁为了制造差异而换叙事角度、增删事实、改细节或编新写法——差异只来自措辞
 - 任何一版单独看，都是同一条朋友圈
 
-【本次 ${versionCount} 版（同一内容的轻微改写，互不完全相同即可）】
-${combos}
+【本次 ${versionCount} 版】同一内容的轻微改写，互不完全相同即可。
 
 ${serviceDetailBlockOf(scene)}
 ${exemplarBlockOf(scene, toneSamples)}
@@ -197,19 +183,16 @@ ${versionBlocks}
 SCENE_NOTES: <简短交代写作理由>`;
 }
 
-export async function generate({ text = '', vision = null, scene = 'unknown', angles, tones: tonesArg, toneSamples = [], versionCount = 3 }) {
-  const tones = (Array.isArray(tonesArg) && tonesArg.length)
-    ? tonesArg
-    : TONE_PRESETS.map(t => t.name);
+export async function generate({ text = '', vision = null, scene = 'unknown', toneSamples = [], versionCount = 3 }) {
   const knowledge = retrieveKnowledge(text, vision);
   const corrections = await findCorrections(scene);
 
   // 未配置 key：给 demo（demoGenerate 只有 3 条样本，versionCount 无效），并明确标注
   if (!llmKeyUsable()) {
-    return { ...demoGenerate({ scene, angles, tones }), demo: true };
+    return { ...demoGenerate({ scene }), demo: true };
   }
 
-  const prompt = buildPrompt({ text, vision, scene, angles, tones, knowledge, corrections, toneSamples, versionCount });
+  const prompt = buildPrompt({ text, vision, scene, knowledge, corrections, toneSamples, versionCount });
 
   // token 上限：关闭推理后 6 版正文仅需千余 token，此处给足冗余作为兜底。
   // max_tokens 只是上限、不产生额外费用；若 LLM_REASONING=on，也为思考留出空间。
@@ -229,7 +212,7 @@ export async function generate({ text = '', vision = null, scene = 'unknown', an
       // 不降级为 demo —— 让上层返回错误，避免假文案被当真
       throw new Error(`调用 LLM 失败：${String(e.message || e)}`);
     }
-    const parsed = parseOutput(content, angles, tones, scene, versionCount);
+    const parsed = parseOutput(content, scene, versionCount);
     if (!parsed.parseFailed) return parsed;
     last = parsed;
     // 解析失败留痕原始输出（此前无任何痕迹，无法定位）
@@ -243,7 +226,7 @@ export async function generate({ text = '', vision = null, scene = 'unknown', an
 
 // ========== 反思改写（供 pipeline 质检循环调用）==========
 // 只重写一版，带上质检反馈（硬规则违规 / 软评分 / 相似度）。失败返回 null，由调用方保留原稿。
-export async function rewriteVersion({ text, scene, angle, tone, userText, vision, feedback = {}, avoidSample, toneSamples = [] }) {
+export async function rewriteVersion({ text, scene, userText, vision, feedback = {}, avoidSample, toneSamples = [] }) {
   if (!llmKeyUsable()) return null;
   const knowledge = retrieveKnowledge(userText, vision);
   const corrections = await findCorrections(scene);
@@ -254,7 +237,7 @@ export async function rewriteVersion({ text, scene, angle, tone, userText, visio
     feedback.similar ? `- 防重复：${feedback.similar}（只需换些措辞、句序，避免与旧稿几乎完全相同，不必换写法）` : null
   ].filter(Boolean).join('\n');
 
-  const prompt = `你是「明哥中港牌」朋友圈文案 Agent。以下一版文案未通过质检，请重写这一版（保持叙事角度：${angle}；语气档：${tone}）。
+  const prompt = `你是「明哥中港牌」朋友圈文案 Agent。以下一版文案未通过质检，请重写这一版（重写稿与原稿是同一条朋友圈：事实、结构、收尾一致，只做措辞级改写）。
 
 ${STYLE_CONSTRAINTS}
 
@@ -319,7 +302,7 @@ function stripSeparators(text) {
   return text.replace(/^[ \t]*(?:-{3,}|={3,}|\*{3,}|—{2,}|─{2,}|·{3,})[ \t]*$/gm, '').trim();
 }
 
-export function parseOutput(content, angles, tones = TONE_PRESETS.map(t => t.name), scene = 'unknown', maxVersions = 3) {
+export function parseOutput(content, scene = 'unknown', maxVersions = 3) {
   const cleaned = stripMarkdown(String(content || ''));
 
   // 元信息（SCENE_NOTES）抽出；IMAGE_PLAN 已废除（2026-10-05），
@@ -350,18 +333,10 @@ export function parseOutput(content, angles, tones = TONE_PRESETS.map(t => t.nam
 
   chunks = chunks.map(stripSeparators).map(t => t.trim()).filter(t => t.length > 0);
 
-  // 角度/语气分配与 buildPrompt 的 comboOf 保持一致
-  const assign = (i) => ({
-    angle: angles[i % angles.length],
-    tone: tones[maxVersions > angles.length
-      ? Math.floor(i / angles.length) % tones.length
-      : i % tones.length]
-  });
-
   // 期望版数不足：如实标记，不静默复制
   if (chunks.length < Math.min(maxVersions, 3)) {
     return {
-      versions: chunks.map((text, i) => ({ text, ...assign(i) })),
+      versions: chunks.map(text => ({ text })),
       sceneNotes,
       parseFailed: true,
       parseNote: `LLM 仅解析出 ${chunks.length}/${maxVersions} 版，请重试`
@@ -369,13 +344,13 @@ export function parseOutput(content, angles, tones = TONE_PRESETS.map(t => t.nam
   }
 
   return {
-    versions: chunks.slice(0, maxVersions).map((text, i) => ({ text, ...assign(i) })),
+    versions: chunks.slice(0, maxVersions).map(text => ({ text })),
     sceneNotes
   };
 }
 
 // ========== 未配置 key 时的演示版本 ==========
-function demoGenerate({ scene, angles, tones }) {
+function demoGenerate({ scene }) {
   const wd = todayWeekday();
   const samples = {
     business: [
@@ -416,11 +391,7 @@ function demoGenerate({ scene, angles, tones }) {
   };
   const list = samples[scene] || samples.unknown;
   return {
-    versions: list.slice(0, 3).map((text, i) => ({
-      text,
-      angle: angles[i % angles.length],
-      tone: tones[i % tones.length]
-    })),
+    versions: list.slice(0, 3).map(text => ({ text })),
     sceneNotes: '[演示版本] 配置 DEEPSEEK_API_KEY 后切换为真实生成。'
   };
 }

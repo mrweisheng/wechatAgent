@@ -15,7 +15,6 @@ import {
   addHistory, recentHistory,
   recordFeedback, addCorrection, findCorrections
 } from './memory/store.js';
-import { WRITE_APPROACHES } from './knowledge/corpus.js';
 import { startIntelCron, runIntelOnce } from './cron/intel.js';
 import { ingestIntel, intelStats, loadIntel } from './ingest/intelIngest.js';
 
@@ -131,21 +130,16 @@ app.post('/api/generate', upload.array('images', 4), wrap(async (req, res) => {
     return res.json({ ok: true, needsMore: true, questions: missing, scene, understood: text || '(仅图)' });
   }
 
-  // 【2026-10-04 澄清】三版 = 同一内容的三种写法（防折叠），写法路径固定三条；
-  // 旧「叙事角度轮换记账」不再参与单次生成（跨次防重由版本级相似度检测承担）
-  const angles = WRITE_APPROACHES;
-
   // LLM 失败直接抛错，由 error handler 转 502 —— 不再返回假文案
-  const out = await runPipeline({ text, vision, scene, angles });
+  const out = await runPipeline({ text, vision, scene });
 
   // 历史写库失败不拖累生成结果：LLM 已成功产出，不能因追加历史抛错让前端拿到 500
   try {
     await addHistory({
       scene, text,
       visionType: vision?.type || null,
-      angles,
       versions: out.versions.map(v => ({
-        angle: v.angle, tone: v.tone, pass: v.hardCheck.pass,
+        pass: v.hardCheck.pass,
         text: v.text,
         score: v.score?.total ?? null,
         similarity: v.similarity ?? 0
@@ -158,7 +152,6 @@ app.post('/api/generate', upload.array('images', 4), wrap(async (req, res) => {
   res.json({
     ok: true,
     scene,
-    angles,
     versions: out.versions,
     candidates: out.candidateCount || out.versions.length,
     sceneNotes: out.sceneNotes,

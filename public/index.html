@@ -429,7 +429,6 @@ function renderVersions(data) {
     return `
       <div class="version${hc.pass ? '' : ' copy-blocked'}">
         <div class="meta">
-          <span class="angle">${escapeHtml(v.angle)} · ${escapeHtml(v.tone)}</span>
           <span>版本 ${i + 1}</span>
         </div>
         <div class="version-text">${escapeHtml(v.text)}</div>
@@ -488,7 +487,6 @@ function renderVersions(data) {
           kind: 'pick',
           payload: {
             scene: data.scene, index: i,
-            angle: v.angle, tone: v.tone,
             text: v.text,
             pass: !(v.hardCheck && v.hardCheck.pass === false)
           }
@@ -744,7 +742,7 @@ document.getElementById('history-toggle').addEventListener('click', async () => 
           const vs = (h.versions || []).map((v, i) => {
             const sc = (v.score != null ? ' · ' + v.score + '分' : '') + (v.pass ? '' : ' · ✗未過');
             return '<div style="padding:6px 10px;margin:4px 0;background:#f8f7f2;border-radius:4px;white-space:pre-wrap">' +
-              '<span style="color:#bbb;font-size:11px">V' + (i + 1) + ' ' + escapeHtml(v.angle || '') + sc + '</span>\n' +
+              '<span style="color:#bbb;font-size:11px">V' + (i + 1) + sc + '</span>\n' +
               escapeHtml((v.text || '').slice(0, 120)) + ((v.text || '').length > 120 ? '…' : '') + '</div>';
           }).join('');
           return head + vs;

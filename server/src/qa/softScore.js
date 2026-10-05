@@ -53,7 +53,7 @@ export function parseScoreJson(raw) {
 
 /**
  * 评分一版文案
- * @param {object} meta { scene, angle, tone }
+ * @param {object} meta { scene }（angle/tone 已随三版机制废除）
  * @param {object} io   { llm, model } —— llm 供测试注入，model 可覆盖评审模型
  * @returns {Promise<{skipped:boolean, total:number|null, premium?:number, novelty?:number, tone?:number, dims?:object, reason?:string}>}
  */
@@ -64,7 +64,7 @@ export async function scoreVersion(text, meta = {}, io = {}) {
 
   const prompt = `你是独立的朋友圈文案评审，与文案作者无任何关系，从严评审、宁低勿高。不受辞藻华丽程度影响，只按以下标准打分。
 
-【评审对象】场景：${meta.scene}；叙事角度：${meta.angle || '无'}；语气档：${meta.tone || '无'}
+【评审对象】场景：${meta.scene}
 【文案】
 ${text}
 
