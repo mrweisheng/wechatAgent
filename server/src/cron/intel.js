@@ -47,22 +47,32 @@ export async function runIntelOnce(queries = DEFAULT_QUERIES, source = 'local-se
   return { ...r, collected: collected.length };
 }
 
+// 【2026-10-06 审计 P2 修复】node-schedule 的字符串 cron 按【服务器本地时区】触发——
+// 服务器/容器若在 UTC，「周一 08:00」会偏 8 小时（香港早晨变香港下午）。
+// 改为显式时区的对象规则；INTEL_TZ 可覆盖，默认 Asia/Hong_Kong。
+export function resolveCronExpr() {
+  return {
+    rule: (process.env.INTEL_CRON || '0 8 * * 1').trim(),
+    tz: (process.env.INTEL_TZ || 'Asia/Hong_Kong').trim()
+  };
+}
+
 export function startIntelCron() {
   if ((process.env.INTEL_ENABLED || '').toLowerCase() !== 'true') {
     console.log(`[intel] cron 未启用（如需本地兜底抓取，设 INTEL_ENABLED=true）`);
     return false;
   }
-  let expr = process.env.INTEL_CRON || '0 8 * * 1';
+  let spec = resolveCronExpr();
   // 非法 cron 表达式会让 scheduleJob 同步抛错，进而整个服务起不来——探针校验后立即取消
   try {
-    const probe = schedule.scheduleJob(expr, () => {});
+    const probe = schedule.scheduleJob(spec, () => {});
     if (!probe) throw new Error('invalid cron');
     probe.cancel();
   } catch {
-    console.error('[intel] INTEL_CRON 表达式非法:', expr, '—— 回落默认 0 8 * * 1');
-    expr = '0 8 * * 1';
+    console.error('[intel] INTEL_CRON 表达式非法:', spec.rule, '—— 回落默认 0 8 * * 1');
+    spec = { rule: '0 8 * * 1', tz: spec.tz };
   }
-  schedule.scheduleJob(expr, async () => {
+  const job = schedule.scheduleJob(spec, async () => {
     try {
       const r = await runIntelOnce();
       console.log(`[intel] ${new Date().toISOString()} 抓到 ${r.received} 条，入库 ${r.added} 条，核实 ${r.verified} 条`);
@@ -70,8 +80,9 @@ export function startIntelCron() {
       console.error('[intel] error:', e.message);
     }
   });
-  console.log(`[intel] cron 已启用: "${expr}"（白名单 ${SOURCE_WHITELIST.length} 个源；主路径建议用外部 Agent 推送）`);
-  return true;
+  console.log(`[intel] cron 已启用: "${spec.rule}" @ ${spec.tz}（白名单 ${SOURCE_WHITELIST.length} 个源；主路径建议用外部 Agent 推送）`);
+  // 返回 job 实例：调用方/测试可 cancel（常驻定时器不 cancel 会挂住进程事件循环）
+  return job || true;
 }
 
 export { intelStats, SOURCE_WHITELIST };

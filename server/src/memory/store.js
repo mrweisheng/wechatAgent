@@ -44,12 +44,25 @@ async function writeJson(file, data) {
   await fs.rename(tmp, file);
 }
 
+// 读-改-写串行化（2026-10-06 审计 P1 修复）：readJson→改→writeJson 不是原子的，
+// 同一文件的并发写（两次生成同时入库历史 / 反馈与纠错同时提交）会读后覆盖、
+// 丢更新（lost update）。原子写只防半截文件，防不了这个——按文件 promise 链串行。
+const fileQueues = new Map();
+function serialize(file, fn) {
+  const prev = fileQueues.get(file) || Promise.resolve();
+  const next = prev.then(fn, fn); // 前序失败不阻塞后续写方
+  fileQueues.set(file, next.catch(() => {}));
+  return next;
+}
+
 // ========== 历史文案（去重指纹）============
 export async function addHistory(entry) {
-  const cur = await readJson(FILES.history, []);
-  cur.unshift({ ...entry, at: new Date().toISOString() });
-  cur.splice(200);
-  await writeJson(FILES.history, cur);
+  return serialize(FILES.history, async () => {
+    const cur = await readJson(FILES.history, []);
+    cur.unshift({ ...entry, at: new Date().toISOString() });
+    cur.splice(200);
+    await writeJson(FILES.history, cur);
+  });
 }
 
 export async function recentHistory(limit = 10) {
@@ -104,6 +117,24 @@ export async function getToneSamples(scene, { limit = 3, maxSim = 0.35 } = {}) {
 }
 
 /**
+ * 近期收尾句（2026-10-06 审计 P2，供 r-ending-repeat 提示规则）
+ * 取最近 history 条目各版本的「收尾行」（最后一个非空且非落款行），去重返回。
+ * 明哥口径：收尾与近期发过的重复 = 视觉疲劳根源。
+ */
+export async function getRecentEndings({ limit = 30 } = {}) {
+  const hist = await readJson(FILES.history, []);
+  const tails = new Set();
+  for (const h of hist.slice(0, limit)) {
+    for (const v of (h.versions || [])) {
+      const lines = String(v.text || '').split(/\r?\n/).map(l => l.trim()).filter(Boolean);
+      const tail = lines.filter(l => !/#\s*明哥中港牌/.test(l)).pop();
+      if (tail) tails.add(tail);
+    }
+  }
+  return [...tails];
+}
+
+/**
  * 版本级去重（2026-10-04 修复）：拿「生成的文案」与「历史生成的文案」比对。
  * 上一版拿用户输入比历史输出，普通话输入 vs 粤语文案 3-gram 几乎不重叠，
  * 同一请求重发也零命中，防重实际不生效。
@@ -135,23 +166,27 @@ export async function findSimilarVersions(texts, { limit = 20, threshold = 0.3 }
 
 // ========== 反馈 ==========
 export async function recordFeedback(payload) {
-  const cur = await readJson(FILES.feedback, []);
-  cur.unshift({ ...payload, at: new Date().toISOString() });
-  cur.splice(500);
-  await writeJson(FILES.feedback, cur);
+  return serialize(FILES.feedback, async () => {
+    const cur = await readJson(FILES.feedback, []);
+    cur.unshift({ ...payload, at: new Date().toISOString() });
+    cur.splice(500);
+    await writeJson(FILES.feedback, cur);
+  });
 }
 
 // ========== 纠错库（文档 6.2-G）============
 export async function addCorrection({ original, corrected, type, scene }) {
-  const cur = await readJson(FILES.corrections, []);
-  cur.unshift({
-    original, corrected,
-    type: type || 'unknown',
-    scene: scene || 'unknown',
-    at: new Date().toISOString()
+  return serialize(FILES.corrections, async () => {
+    const cur = await readJson(FILES.corrections, []);
+    cur.unshift({
+      original, corrected,
+      type: type || 'unknown',
+      scene: scene || 'unknown',
+      at: new Date().toISOString()
+    });
+    cur.splice(200);
+    await writeJson(FILES.corrections, cur);
   });
-  cur.splice(200);
-  await writeJson(FILES.corrections, cur);
 }
 
 export async function findCorrections(scene) {

@@ -50,17 +50,17 @@ test('硬规则违规触发重写，改好则采纳', async () => {
   assert.equal(fixed.hardCheck.pass, true);
 });
 
-test('低分（<70）触发重写，改差则弃用保留原稿', async () => {
+test('低分（<60）触发重写，改差则弃用保留原稿', async () => {
   const io = fakeIo({
     versionsTexts: [GOOD, GOOD, GOOD],
     rewriteResults: [BAD_NUM], // 越改越差
     scores: (text) => text === GOOD
-      ? { total: 60, premium: 60, novelty: 60, tone: 60, skipped: false } // 原稿低分
+      ? { total: 55, premium: 55, novelty: 55, tone: 55, skipped: false } // 原稿低分
       : { total: 90, premium: 90, novelty: 90, tone: 90, skipped: false },
     sims: { sim: 0, sample: '' }
   });
   const out = await runPipeline({ text: '收工', scene: 'daily', angles: ANGLES }, io);
-  // 原稿 pass 且 60 分；重写稿虽 90 分但硬规则违规（数字）—— 必须弃用
+  // 原稿 pass 且 55 分；重写稿虽 90 分但硬规则违规（数字）—— 必须弃用
   assert.equal(out.versions[0].text, GOOD);
   assert.equal(out.versions[0].rewrites, 0);
 });
@@ -85,8 +85,40 @@ test('相似度 ≥0.6 触发重写并传入规避样本', async () => {
   assert.ok(captured.feedback.similar, '质检反馈应包含相似度说明');
 });
 
+// 【2026-10-06 审计 P1】仅低分触发的重写稿若创意改写、偏离原稿结构，
+// 采纳会把同批三版「互为轻微改写」的结构冲散——必须弃用保结构。
+test('低分重写稿偏离原稿结构时弃用（保三版轻微改写结构）', async () => {
+  const DRIFT = '週末去咗海邊食飯睇日落，吹住海風好舒服。\n\n#明哥中港牌'; // 高分但与原稿几无重叠
+  const io = fakeIo({
+    versionsTexts: [GOOD, GOOD, GOOD],
+    rewriteResults: [DRIFT],
+    scores: (text) => text === GOOD
+      ? { total: 55, premium: 55, novelty: 55, tone: 55, skipped: false } // 原稿低分触发重写
+      : { total: 92, premium: 92, novelty: 92, tone: 92, skipped: false }, // 重写稿高分
+    sims: { sim: 0, sample: '' }
+  });
+  const out = await runPipeline({ text: '收工', scene: 'daily', angles: ANGLES }, io);
+  assert.equal(out.versions[0].text, GOOD, '偏离原稿的高分重写稿不得采纳');
+  assert.equal(out.versions[0].rewrites, 0);
+});
+
+test('低分重写稿仍是轻微改写时正常采纳', async () => {
+  const LIGHT = '搞掂晒。\n\n好事，靜靜哋發生。\n\n#明哥中港牌'; // 原稿的换词级轻微改写
+  const io = fakeIo({
+    versionsTexts: [GOOD, GOOD, GOOD],
+    rewriteResults: [LIGHT],
+    scores: (text) => text === GOOD
+      ? { total: 55, premium: 55, novelty: 55, tone: 55, skipped: false }
+      : { total: 85, premium: 85, novelty: 85, tone: 85, skipped: false },
+    sims: { sim: 0, sample: '' }
+  });
+  const out = await runPipeline({ text: '收工', scene: 'daily', angles: ANGLES }, io);
+  assert.equal(out.versions[0].text, LIGHT, '轻微改写的高分重写稿应采纳');
+  assert.equal(out.versions[0].rewrites, 1);
+});
+
 test('重写轮次上限 2：不会无限重试', async () => {
-  let scoreSeq = [50, 55, 60]; // 一直不及格
+  let scoreSeq = [40, 45, 50]; // 一直不及格（2026-10-06 及格线 60）
   let idx = 0;
   const io = fakeIo({
     versionsTexts: [GOOD, GOOD, GOOD],

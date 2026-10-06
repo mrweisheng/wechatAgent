@@ -262,12 +262,13 @@ test('全场景下 checked 如实反映已评估规则', () => {
   const r = checkHardRules('搞掂晒。\n\n#明哥中港牌', {
     scene: 'greeting', userText: 'x', vision: { type: 'screenshot', description: '客戶群對話', extracted: { hasPII: true } }
   });
-  // greeting 场景下：晒单/未来时间/口岸/交车/到场次数/收尾 等场景规则均不适用，其余应已评估
+  // greeting 场景下：晒单/未来时间/口岸/交车/到场次数/收尾 等场景规则均不适用；
+  // r-ending-repeat 依赖 ctx.recentTails（未提供 = 不评估），其余应已评估
   assert.deepEqual(r.unimplemented.sort(), [
-    'r-car-delivery-scope', 'r-low-ending', 'r-no-future-time',
+    'r-car-delivery-scope', 'r-ending-repeat', 'r-low-ending', 'r-no-future-time',
     'r-port-unverified', 'r-sharedan-completed', 'r-visit-count'
   ]);
-  assert.equal(r.checked, r.declared - 6);
+  assert.equal(r.checked, r.declared - 7);
 });
 
 // 【回归 2026-10-05 明哥业务反馈】纯购车交车帖不得接两地牌后续
@@ -436,6 +437,45 @@ test('价格检测：千万副词不误伤，真实金额仍拦', () => {
   assert.ok(!V(adv2).includes('r-no-numbers'), '千万要 不应判为价格');
   const price = checkHardRules('唔使一千萬，幾百萬都有。\n\n#明哥中港牌');
   assert.ok(V(price).includes('r-no-numbers'), '真实金额仍应拦');
+});
+
+// 【回归 2026-10-06 审计】夸张修辞（十萬火急/一萬個理由/千萬記得/一萬分感謝等）
+// 原被误拦为价格——金额后紧跟 記/個/分/倍/火 属修辞语境，豁免；真实金额仍拦。
+test('价格检测：夸张修辞成语不误伤（十萬火急/一萬個/千萬記得/一萬分/十萬倍）', () => {
+  const idioms = [
+    '呢件事十萬火急，即刻處理。',
+    '一萬個理由，都唔夠一個行動實在。',
+    '十萬個為甚麼，問完就要做。',
+    '千萬記得，穩陣最緊要。',
+    '一萬分感謝，記喺心度。',
+    '快過人十萬倍，唔係靠把口。',
+    '百萬分之一嘅機會，都俾佢把握到。'
+  ];
+  for (const t of idioms) {
+    const r = checkHardRules(t + '\n\n#明哥中港牌');
+    assert.ok(!V(r).includes('r-no-numbers'), `修辞误拦：${t} -> ${V(r).join(',')}`);
+  }
+  // 真实金额（含「成百萬」粤语说法）仍必须拦
+  const prices = ['叫價百萬。', '預算十萬左右。', '成百萬嘅貨。', '八十萬元正。'];
+  for (const t of prices) {
+    const r = checkHardRules(t + '\n\n#明哥中港牌');
+    assert.ok(V(r).includes('r-no-numbers'), `真实金额漏拦：${t}`);
+  }
+});
+
+// 【2026-10-06 审计 P2】收尾复读提示：收尾与近期发过的文案重复 = 视觉疲劳根源（明哥口径）
+test('r-ending-repeat：收尾与近期重复时提示，未提供近期收尾不评估', () => {
+  const text = '早晨，星期一。\n\n霧未散，路已經有人行。\n\n路上見。\n\n#明哥中港牌';
+  const dup = checkHardRules(text, { scene: 'greeting', recentTails: ['路上見。', '慢慢嚟。'] });
+  assert.ok(W(dup).includes('r-ending-repeat'), `复读收尾应提示：${W(dup).join(',')}`);
+  assert.equal(dup.pass, true, '仅提示不阻断');
+
+  const fresh = checkHardRules(text, { scene: 'greeting', recentTails: ['各自安好。'] });
+  assert.ok(!W(fresh).includes('r-ending-repeat'), '新收尾不应提示');
+
+  const noCtx = checkHardRules(text, { scene: 'greeting' });
+  assert.ok(!W(noCtx).includes('r-ending-repeat'), '无 recentTails 不评估');
+  assert.ok(noCtx.unimplemented.includes('r-ending-repeat'), '无 recentTails 时应如实列入未评估');
 });
 
 // 【回归 2026-10-05】「學生/醫生/發生」等非称呼词不应被当作客户称呼误拦

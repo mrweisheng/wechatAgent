@@ -8,7 +8,7 @@
   "scripts": {
     "start": "node server/src/index.js",
     "dev": "node --watch server/src/index.js",
-    "test": "node --test server/src/*.test.js server/src/qa/*.test.js server/src/perception/*.test.js server/src/generation/*.test.js server/src/memory/*.test.js server/src/llm/*.test.js server/src/ingest/*.test.js server/src/knowledge/*.test.js"
+    "test": "node --test server/src/*.test.js server/src/qa/*.test.js server/src/perception/*.test.js server/src/generation/*.test.js server/src/memory/*.test.js server/src/llm/*.test.js server/src/ingest/*.test.js server/src/knowledge/*.test.js server/src/search/*.test.js server/src/cron/*.test.js"
   },
   "engines": {
     "node": ">=20"

@@ -10,10 +10,10 @@
 // 改写采纳策略：只有「严格更优」才采纳重写稿（pass 状态 > 软评分 > 相似度），
 // 防止改写越改越差。所有 LLM 调用按版本并行，控制在可接受的时延内。
 
-import { generate, rewriteVersion } from './generator.js';
+import { generate, rewriteVersion, sanitizeFinalText } from './generator.js';
 import { scoreVersion, SOFT_PASS } from '../qa/softScore.js';
 import { checkHardRules } from '../qa/ruleEngine.js';
-import { findSimilarVersions, getToneSamples, textSimilarity } from '../memory/store.js';
+import { findSimilarVersions, getToneSamples, getRecentEndings, textSimilarity } from '../memory/store.js';
 import { STYLE_EXEMPLARS } from '../knowledge/corpus.js';
 
 // 相似度阈值（2026-10-05 明哥两轮澄清后的最终口径）：
@@ -27,8 +27,14 @@ const envRatio = (name, def) => {
 };
 const SIM_THRESHOLD = envRatio('SIM_REWRITE_THRESHOLD', 0.9);
 const MUTUAL_SIM_MAX = envRatio('SIM_MUTUAL_MAX', 0.99);
+// 低分触发（无硬违规、无相似触发）的重写稿，与原稿的最小相似度（2026-10-06 审计 P1）：
+// 这种重写在 prompt 层被要求「仍是原稿的轻微改写」，但实测提分诱因会让模型创意改写，
+// 采纳后同批三版「互为轻微改写」的结构被冲散（实测互相似度掉到 0.05~0.25）。
+// 采纳闸：低分重写的稿子必须仍是原稿的轻微改写，否则弃用保结构。
+// （硬违规/相似触发的重写不受此限——它们本就需要结构性改动。）
+const SIM_LIGHT_MIN = envRatio('SIM_LIGHT_MIN', 0.45);
 const MAX_REWRITE_ROUNDS = 2;
-// 候选池大小：3 角度 × 2 语气 = 6；环境变量可调（演示模式固定 3）
+// 候选池大小：同一母版的 6 个轻微改写候选，质检后取最优 3 版；环境变量可调（演示模式固定 3）
 const CANDIDATE_COUNT = Math.max(3, Number(process.env.GENERATE_CANDIDATES) || 6);
 
 function needsRewrite(v) {
@@ -54,13 +60,15 @@ export async function runPipeline({ text, vision, scene }, io = {}) {
   // 语气资产库（§6.2-B）：明哥选中过的历史样本作为 few-shot，并纳入防照抄比对。
   // 注：三版已是「同一文案轻微改写」，不再有语气档轮换；tones/angles 参数已废除。
   const toneSamples = io.toneSamples || await getToneSamples(scene);
+  // 近期收尾（供 r-ending-repeat 提示规则，2026-10-06 审计 P2）
+  const recentTails = io.recentTails || await getRecentEndings();
   const wantCandidates = io.candidateCount || CANDIDATE_COUNT;
   // demo 模式（未配 key）生成层只会给 3 版，这里不强求 6
   const out = await doGenerate({ text, vision, scene, toneSamples, versionCount: wantCandidates });
 
   const candidates = out.versions.map(v => ({
     ...v,
-    hardCheck: checkHardRules(v.text, { scene, userText: text, vision }),
+    hardCheck: checkHardRules(v.text, { scene, userText: text, vision, recentTails }),
     score: null,
     similarity: 0,
     similarSample: '',
@@ -90,7 +98,7 @@ export async function runPipeline({ text, vision, scene }, io = {}) {
     }
   }
   await Promise.all(candidates.map(async v => {
-    v.score = await doScore(v.text, { scene, angle: v.angle, tone: v.tone });
+    v.score = await doScore(v.text, { scene });
   }));
 
   // ---- Best-of-N 筛选（2026-10-05 明哥再次澄清后重构）----
@@ -118,6 +126,10 @@ export async function runPipeline({ text, vision, scene }, io = {}) {
     const snapshot = versions.slice();
     const results = await Promise.all(idxs.map(async i => {
       const v = snapshot[i];
+      // 触发原因快照：仅低分触发的重写，采纳时须过「仍是轻微改写」闸（SIM_LIGHT_MIN）
+      const scoreOnlyTrigger = v.hardCheck.pass
+        && !(v.similarity != null && v.similarity >= SIM_THRESHOLD)
+        && (v.score?.total != null && v.score.total < SOFT_PASS);
       const feedback = {
         violations: v.hardCheck.violations.map(x => x.msg),
         score: v.score?.total != null
@@ -138,33 +150,50 @@ export async function runPipeline({ text, vision, scene }, io = {}) {
         return null; // 重写失败保留原稿
       }
 
+      // 【2026-10-06 审计 P0】采纳前再净化一次：rewrite 通道是版本头泄漏主通道，
+      // io.rewrite 注入路径（测试/未来替代实现）也必须过同一道闸。
+      const cleanText = sanitizeFinalText(rewritten);
+      if (!cleanText) {
+        console.warn('[pipeline] rewrite 净化后为空，保留原稿');
+        return null;
+      }
+
       const cand = {
         ...v,
-        text: rewritten,
-        hardCheck: checkHardRules(rewritten, { scene, userText: text, vision })
+        text: cleanText,
+        hardCheck: checkHardRules(cleanText, { scene, userText: text, vision, recentTails })
       };
       const [score, sims2] = await Promise.all([
-        doScore(rewritten, { scene }),
-        doSimilar([rewritten])
+        doScore(cleanText, { scene }),
+        doSimilar([cleanText])
       ]);
       cand.score = score;
       cand.similarity = sims2[0]?.sim ?? 0;
       cand.similarSample = sims2[0]?.sample || '';
       for (const ex of refTexts) {
-        const s = textSimilarity(rewritten, ex);
+        const s = textSimilarity(cleanText, ex);
         if (s > cand.similarity) {
           cand.similarity = s;
           cand.similarSample = ex.slice(0, 60);
         }
       }
-      return { i, base: v, cand };
+      return { i, base: v, cand, scoreOnlyTrigger };
     }));
 
     // 采纳阶段串行：防折叠防线（2026-10-04）与「严格更优」判断基于实时 versions，
     // 确保后采纳的稿不与已采纳稿雷同、且各自严格优于本轮原稿。
     for (const r of results) {
       if (!r) continue;
-      const { i, base, cand } = r;
+      const { i, base, cand, scoreOnlyTrigger } = r;
+      // 轻微改写闸（2026-10-06 审计 P1）：仅低分触发的重写稿若已偏离原稿结构，
+      // 采纳它会冲散同批三版「互为轻微改写」的结构——宁可保留原低分稿。
+      if (scoreOnlyTrigger) {
+        const drift = textSimilarity(cand.text, base.text);
+        if (drift < SIM_LIGHT_MIN) {
+          console.warn(`[pipeline] 低分重写稿偏离原稿（sim=${drift} < ${SIM_LIGHT_MIN}），弃用保三版结构`);
+          continue;
+        }
+      }
       const mutualOk = versions.every((o, j) => j === i || textSimilarity(cand.text, o.text) < MUTUAL_SIM_MAX);
       if (rankOf(cand) > rankOf(base) && mutualOk) {
         cand.rewrites = base.rewrites + 1;

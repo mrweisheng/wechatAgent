@@ -7,3 +7,5 @@ _TRASH_*
 uploads/
 .npm-cache/_patch_*.mjs
 _e2e_*.mjs
+
+.workbuddy/

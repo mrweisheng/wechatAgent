@@ -44,6 +44,19 @@ test('场景路由：视觉识别出状态优先归业务', () => {
   assert.equal(routeScene({ text: '', vision: { type: 'other', extracted: { status: '交車' } } }), 'business');
 });
 
+// 【回归 2026-10-06 审计】交车的粤语高频说法（交咗/交左/提車/交付/攞車）原先路由成
+// unknown —— r-car-delivery-scope / r-port-unverified / r-sharedan-completed /
+// r-no-future-time / r-visit-count / r-low-ending 六条场景门控规则整层失效
+// （生产实证 2026-10-06 02:55:07：「今日交咗部車畀客戶」-> unknown）。
+test('场景路由：交车粤语说法归 business（业务红线不再整层失效）', () => {
+  assert.equal(routeScene({ text: '今日交咗部車畀客戶' }), 'business');
+  assert.equal(routeScene({ text: '交左部車' }), 'business');
+  assert.equal(routeScene({ text: '提車' }), 'business');
+  assert.equal(routeScene({ text: '交付完成' }), 'business');
+  assert.equal(routeScene({ text: '客戶嚟攞車' }), 'business');
+  assert.equal(routeScene({ text: '交咗部車，客人好滿意' }), 'business');
+});
+
 // 审核发现的死代码：原先要求「完全无输入」才追问，与 detectMissing 内部条件互斥
 test('有输入但要素缺失时应追问（原先不可达）', () => {
   const m = detectMissing({ scene: 'car', text: '今日推薦', vision: null });

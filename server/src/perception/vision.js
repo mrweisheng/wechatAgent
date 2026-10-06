@@ -65,7 +65,11 @@ export function routeScene({ text = '', vision = null }) {
   // 视觉信号提到泛化词之前：避免「明确的车图/海报 + 随口一句泛化文本」被带偏
   // （审核报告指出：文本正则独裁易误路由带图输入）。
   if (/中秋|國慶|国庆|春節|春节|端午|聖誕|圣诞|元旦|復活節|复活节/.test(text)) return 'festival';
-  if (/交車|交车|選號|选号|驗車|验车|裝卡|装卡|通關|通关|過戶|过户|落定|搞掂|到店|諮詢|咨询|辦理|办理|簽約|签约|委託|委托/.test(text)) return 'business';
+  // 【修复 2026-10-06 审计】交车的粤语高频说法（交咗/交左/提車/交付/攞車）原先全部
+  // 路由成 unknown —— 导致 r-car-delivery-scope / r-port-unverified / r-sharedan-completed /
+  // r-no-future-time / r-visit-count / r-low-ending 六条按场景门控的业务红线整层失效
+  // （生产实证：「今日交咗部車畀客戶」-> unknown）。
+  if (/交車|交车|交咗|交左|提車|提车|交付|攞車|攞车|選號|选号|驗車|验车|裝卡|装卡|通關|通关|過戶|过户|落定|搞掂|到店|諮詢|咨询|辦理|办理|簽約|签约|委託|委托/.test(text)) return 'business';
 
   if (vision?.extracted?.status) return 'business';
   if (vision?.type === 'screenshot') return 'business';

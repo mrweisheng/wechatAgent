@@ -34,6 +34,37 @@ test('版本级去重：相同输出 vs 历史输出应强命中（上一版拿�
 // 【2026-10-05】getPreferredToneOrder 已随三档语气机制删除：三版=同一文案轻微改写后，
 // 语气档不复存在，反馈回填语气的机制一并移除。
 
+// 【2026-10-06 审计 P1】读-改-写串行化：并发写同一文件不得丢更新（lost update）
+test('并发写串行化：20 个并发 addHistory 全部入库，无丢失', async () => {
+  const N = 20;
+  await Promise.all(Array.from({ length: N }, (_, i) =>
+    store.addHistory({ scene: 'daily', text: `并发-${i}`, versions: [{ pass: true, text: `文案${i}` }] })
+  ));
+  const items = await store.recentHistory(N + 5);
+  const got = new Set(items.map(h => h.text));
+  for (let i = 0; i < N; i++) {
+    assert.ok(got.has(`并发-${i}`), `并发写入丢失：并发-${i}`);
+  }
+});
+
+// 【2026-10-06 审计 P2】近期收尾句：供 r-ending-repeat 提示规则比对复读
+test('getRecentEndings：提取各版本收尾行（非落款最后一行）并去重', async () => {
+  await store.addHistory({
+    scene: 'greeting', text: '早安',
+    versions: [
+      { pass: true, text: '早晨，星期一。\n\n霧未散。\n\n路上見。\n\n#明哥中港牌' },
+      { pass: true, text: '早晨，星期一。\n\n霧未散。\n\n路上見。\n\n#明哥中港牌 #早安' },
+      { pass: true, text: '早晨。\n\n行得早嘅人知去邊。\n\n#明哥中港牌' }
+    ]
+  });
+  const tails = await store.getRecentEndings();
+  assert.ok(tails.includes('路上見。'), '应提取收尾行');
+  assert.ok(tails.includes('行得早嘅人知去邊。'));
+  assert.equal(tails.filter(t => t === '路上見。').length, 1, '重复收尾应去重');
+  assert.ok(!tails.some(t => t.includes('#明哥中港牌')), '落款行不得混入');
+  // 带业务标签的落款行也不当作收尾：「路上見。…#明哥中港牌 #早安」的收尾仍是「路上見。」
+});
+
 test('语气资产库：选中且通过硬规则的正文沉淀为样本（M2 §6.2-B）', async () => {
   const A = '號碼定咗。\n\n群裡一句「搞掂」，\n背後成個流程安安穩穩。\n\n#明哥中港牌';
   const B = '交車。\n\n佢先繞住部車行咗一圈，先開門上車。\n\n#明哥中港牌';

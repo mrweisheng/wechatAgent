@@ -114,7 +114,8 @@ export const HARD_RULES = [
   { id: 'r-car-delivery-scope', desc: '纯购车交车帖不得添加两地牌后续（装卡/选号/验车）', level: 'blocking' },
   { id: 'r-visit-count',        desc: '不写客户到場次数（仅提示）', level: 'advisory' },
   { id: 'r-low-ending',         desc: '交车/业务帖收尾不得用路上見/各自返程（仅提示）', level: 'advisory' },
-  { id: 'r-geo-hk',             desc: '公司位于香港，不写「客户从香港过来」（仅提示）', level: 'advisory' }
+  { id: 'r-geo-hk',             desc: '公司位于香港，不写「客户从香港过来」（仅提示）', level: 'advisory' },
+  { id: 'r-ending-repeat',      desc: '收尾不得与近期发过的文案重复（仅提示，依赖记忆层近期收尾）', level: 'advisory' }
 ];
 
 // ========== 套话黑名单（阻断）============

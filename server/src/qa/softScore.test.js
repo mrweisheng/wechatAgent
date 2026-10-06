@@ -35,11 +35,22 @@ test('parseScoreJson：越界收敛到 1-5 档，非数字判失败', () => {
   assert.equal(parseScoreJson('模型无法评审'), null);
 });
 
-test('权重与阈值符合 §11.8（40/30/30，70 分及格，5 档制）', () => {
+// 【回归 2026-10-06 审计】6-19 既非 1-5 档也不像 0-100，原先折叠成 1 档=0 分拖穿总分
+test('parseScoreJson：6-19 噪声档位判失败（优雅降级，不再折叠成 0 分）', () => {
+  assert.equal(parseScoreJson('{"premium":10,"novelty":3,"tone":3}'), null);
+  assert.equal(parseScoreJson('{"premium":4,"novelty":6,"tone":4}'), null);
+  assert.equal(parseScoreJson('{"premium":19,"novelty":4,"tone":4}'), null);
+  // 20 及以上仍是合法 0-100 折算路径
+  assert.equal(parseScoreJson('{"premium":20,"novelty":4,"tone":4}').dims.premium, 1);
+});
+
+// 【2026-10-06 审计修正】及格线 70→60：5 档锚点（4档=75/3档=50）与 70 错配，
+// 典型达标分 4/3/4=68 被误判不及格，生产 58% 版本白触发反思改写。
+test('权重与阈值符合 §11.8（40/30/30，60 分及格，5 档制）', () => {
   assert.equal(SOFT_WEIGHTS.premium, 0.4);
   assert.equal(SOFT_WEIGHTS.novelty, 0.3);
   assert.equal(SOFT_WEIGHTS.tone, 0.3);
-  assert.equal(SOFT_PASS, 70);
+  assert.equal(SOFT_PASS, 60);
   assert.equal(SCALE_MAX, 5);
 });
 

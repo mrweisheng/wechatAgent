@@ -21,7 +21,12 @@ import {
 // 原先全部漏网——车源输入常带阿拉伯数字价格，LLM 回显时正是这种写法。
 // 【修复 2026-10-05】「千萬/千万」作副词（如「千萬唔好急」）会被误判为价格：
 //   中文数字金额后若紧跟否定/意愿副词（唔/不/別/别/咪/勿/要），不判为价格。
-const PRICE_LIKE = /(?:[¥$￥]\s*\d{1,3}(?:[,，]\s*\d{3})+|[¥$￥]\s*\d+\s*起|\d+(?:\.\d+)?\s*[萬万]|\d{5,}\s*(?:元|塊|块|蚊|RMB|HKD)|[一二三四五六七八九十百千万]{1,4}[萬万](?![唔不別别咪勿要]))/;
+// 【修复 2026-10-06 审计】夸张修辞误伤补漏（实测 battery 验证）：
+//   「十萬火急/一萬個理由/千萬記得/一萬分感謝/十萬倍奉還/百萬分之一」均被误拦——
+//   金额后紧跟 記/個/分/倍/火 同属修辞语境，一并豁免。
+//   已知边界：「八十萬分兩期」类真实价格+分期写法会被豁免放行（修辞用法远多于
+//   分期写法，且阿拉伯数字分支 80萬 不受此豁免影响，仍拦）。
+const PRICE_LIKE = /(?:[¥$￥]\s*\d{1,3}(?:[,，]\s*\d{3})+|[¥$￥]\s*\d+\s*起|\d+(?:\.\d+)?\s*[萬万]|\d{5,}\s*(?:元|塊|块|蚊|RMB|HKD)|[一二三四五六七八九十百千万]{1,4}[萬万](?![唔不別别咪勿要記个個分倍火]))/;
 const MILEAGE_LIKE = /[\d,]+\s*[萬万]?\s*(?:公里|km|KM|千米|英里)/;
 // 真实车牌：粤Z·A1234 / 粤B12345 / 粵Z 88888（内地牌=汉字+字母+5位；港牌=2字母+4位）
 const PLATE_LIKE = /[粤粵][A-Z]\s*[·•]?\s*[A-Z0-9]{4,5}|[A-Z]{2}\s*[·•]?\s*\d{4}/;
@@ -400,6 +405,22 @@ export function checkHardRules(text, ctx = {}) {
   evaluated.add('r-geo-hk');
   if (/從香港過來|从香港过来|從香港趕來|从香港赶来/.test(text)) {
     warnings.push({ id: 'r-geo-hk', msg: '公司本部位於香港，香港客戶是本地客戶：不應寫「客戶從香港過來／趕來」' });
+  }
+
+  // ---- r-ending-repeat：收尾不得与近期发过的文案重复（2026-10-06 审计 P2，仅提示）----
+  // 明哥口径：视觉疲劳的根源是复读，不是句式。生成端 prompt 已有约束，这是最后一道提示闸。
+  // 判定依赖 ctx.recentTails（调用方从记忆层取近期收尾）——未提供时不评估
+  // （证据型规则：anchors 自检等无记忆上下文的调用天然不误报）。
+  const recentTails = Array.isArray(ctx.recentTails) && ctx.recentTails.length ? ctx.recentTails : null;
+  if (recentTails) {
+    evaluated.add('r-ending-repeat');
+    const tail = lines.filter(l => !/#\s*明哥中港牌/.test(l)).pop() || '';
+    if (tail && recentTails.includes(tail)) {
+      warnings.push({
+        id: 'r-ending-repeat',
+        msg: `收尾「${tail.slice(0, 30)}」与近期发过的文案重复——视觉疲劳的根源是复读，请换个说法`
+      });
+    }
   }
 
   // ---- 如实报告：checked = 已评估规则数（不再虚报 HARD_RULES.length）----

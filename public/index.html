@@ -409,9 +409,9 @@ function renderVersions(data) {
       : '高級感 ' + (sc ? sc.premium : '?') + ' · 新意 ' + (sc ? sc.novelty : '?') + ' · 調性 ' + (sc ? sc.tone : '?');
     const scoreHtml = !sc || sc.total == null
       ? ''
-      : '<div class="hard-check" style="color:' + (sc.total >= 70 ? 'var(--pass)' : 'var(--warn)') + '" title="' + escapeHtml(sc.reason || '') + '">' +
+      : '<div class="hard-check" style="color:' + (sc.total >= 60 ? 'var(--pass)' : 'var(--warn)') + '" title="' + escapeHtml(sc.reason || '') + '">' +
         '軟評分 ' + sc.total + '（' + dimText + '）' +
-        (sc.total < 70 ? ' — 未達 70 分' : '') + '</div>';
+        (sc.total < 60 ? ' — 未達 60 分' : '') + '</div>';
     const simHtml = (v.similarity != null && v.similarity >= 0.6)
       ? '<div class="hard-check" style="color:var(--warn)">🔁 與歷史文案相似度 ' + v.similarity + '，注意「越寫越像」</div>'
       : '';
@@ -455,7 +455,7 @@ function renderVersions(data) {
 
   previewEl.innerHTML = `
     ${banners.join('')}
-    <div class="scene-tag">場景 · ${escapeHtml(sceneName)}${data.candidates > (data.versions || []).length ? ' ｜ 已從 ' + data.candidates + ' 個候選中篩出最優 ' + (data.versions || []).length + ' 版' : ''}</div>
+    <div class="scene-tag">場景 · ${escapeHtml(sceneName)}${data.candidates > (data.versions || []).length ? ' ｜ 同一母版輕微改寫 ' + data.candidates + ' 版，質檢後取 ' + (data.versions || []).length + ' 版' : ''}</div>
     <div class="versions">${versionsHtml}</div>
     ${data.sceneNotes ? '<div class="image-plan" style="margin-top:8px"><b>寫作理由</b>' + escapeHtml(data.sceneNotes) + '</div>' : ''}
   `;

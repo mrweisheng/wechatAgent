@@ -63,19 +63,29 @@ test('429 限流自动重试 1 次；持续失败则如实抛错', async () => {
   }
 });
 
-test('推理开关：默认关闭（注入 reasoning_effort=none），LLM_REASONING=on 恢复', async () => {
+// 【2026-10-06 审计修正】reasoning_effort='none' 是 OpenCode Go 网关扩展参数，
+// DeepSeek 官方 API 未验证支持——只在网关模式注入，官方通道不得携带。
+test('推理开关：仅网关模式注入 reasoning_effort=none，官方通道不注入', async () => {
   const realFetch = globalThis.fetch;
   const bodies = [];
   globalThis.fetch = async (url, opts) => { bodies.push(JSON.parse(opts.body)); return okResponse('x'); };
   try {
     delete process.env.LLM_REASONING;
+    process.env.OPENCODE_GO = 'true';
     await llmChat([{ role: 'user', content: 'hi' }], { max_tokens: 10 });
+    assert.equal(bodies[0].reasoning_effort, 'none', '网关模式默认应关闭推理');
+
     process.env.LLM_REASONING = 'on';
     await llmChat([{ role: 'user', content: 'hi' }], { max_tokens: 10 });
-    assert.equal(bodies[0].reasoning_effort, 'none', '默认应关闭推理');
     assert.equal(bodies[1].reasoning_effort, undefined, 'LLM_REASONING=on 不应注入');
+
+    process.env.LLM_REASONING = 'off';
+    process.env.OPENCODE_GO = '';
+    await llmChat([{ role: 'user', content: 'hi' }], { max_tokens: 10 });
+    assert.equal(bodies[2].reasoning_effort, undefined, '官方通道不得注入网关扩展参数');
   } finally {
     delete process.env.LLM_REASONING;
+    process.env.OPENCODE_GO = '';
     globalThis.fetch = realFetch;
   }
 });

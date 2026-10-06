@@ -49,8 +49,10 @@ export async function llmChat(messages, opts = {}, attempt = 0) {
   }
   const body = { model: (opts.model ? opts.model : llmModel()), messages, max_tokens: opts.max_tokens ?? 1000 };
   if (opts.temperature != null) body.temperature = opts.temperature;
-  // 关推理：reasoning_effort='none'（实测 reasoning_tokens=0）
-  if (!llmReasoningEnabled()) body.reasoning_effort = 'none';
+  // 关推理：reasoning_effort='none'（实测 reasoning_tokens=0）。
+  // 【2026-10-06 审计修正】这是 OpenCode Go 网关的扩展参数，DeepSeek 官方 API
+  // 未验证支持——官方通道注入未知参数有 400 风险，仅在网关模式注入。
+  if (!llmReasoningEnabled() && process.env.OPENCODE_GO === 'true') body.reasoning_effort = 'none';
   const label = opts.label || 'llm';
 
   try {

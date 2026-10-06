@@ -4,13 +4,13 @@ import express from 'express';
 import multer from 'multer';
 import crypto from 'node:crypto';
 import path from 'node:path';
-import fs from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 
 import { channelStatus } from './search/channels.js';
 import { classifyImage, routeScene, detectMissing, isImageMime, mergeVisions } from './perception/vision.js';
 import { runPipeline } from './generation/pipeline.js';
 import { INTEL_TOPICS, INTEL_GUIDELINES, INTEL_RECENCY } from './knowledge/corpus.js';
+import { llmKeyUsable } from './llm/client.js';
 import {
   addHistory, recentHistory,
   recordFeedback, addCorrection, findCorrections
@@ -75,24 +75,41 @@ function failRateLimit(req, res, next) {
   next();
 }
 
+// ---- 生成接口限流（2026-10-06 审计 P1）----
+// /api/generate 是烧钱入口（单次请求 = 母版 + 改写 + 评审 + 反思多轮 LLM 调用），
+// 公网暴露无限制会被刷爆额度。按 IP 计次，默认 30 次/小时（GENERATE_RATE_LIMIT 可调）。
+// 反向代理部署时所有请求同源 IP，属已知局限（与 failRateLimit 同口径，见 README）。
+const genHits = new Map();
+const GEN_WINDOW_MS = 60 * 60 * 1000;
+const GEN_MAX = Math.max(1, Number(process.env.GENERATE_RATE_LIMIT) || 30);
+function genRateLimit(req, res, next) {
+  const ip = req.socket.remoteAddress || 'unknown';
+  const now = Date.now();
+  // 防内存无界增长：超过阈值时清理已过期窗口
+  if (genHits.size > 1000) {
+    for (const [k, v] of genHits) if (v.until <= now) genHits.delete(k);
+  }
+  const rec = genHits.get(ip);
+  if (rec && rec.until > now && rec.count >= GEN_MAX) {
+    res.set('Retry-After', Math.ceil((rec.until - now) / 1000));
+    return res.status(429).json({ ok: false, error: '生成过于频繁，请稍后再试' });
+  }
+  if (!rec || rec.until <= now) genHits.set(ip, { count: 1, until: now + GEN_WINDOW_MS });
+  else rec.count++;
+  next();
+}
+
 // ---- 公开健康检查（不含敏感信息）----
 app.get('/api/healthz', (req, res) => {
-  res.json({ ok: true, llm: isLlmConfigured() });
+  res.json({ ok: true, llm: llmKeyUsable() });
 });
-
-function isLlmConfigured() {
-  const k = (process.env.DEEPSEEK_API_KEY || '').trim();
-  if (!k || /REPLACE/.test(k) || k.length < 20) return false;
-  // 接受两种前缀：DeepSeek 官方 sk-，OpenCode Go 的 oc_sk_
-  return k.startsWith('sk-') || k.startsWith('oc_sk_');
-}
 
 // ---- 完整健康检查：渠道真实状态 ----
 app.get('/api/health', wrap(async (req, res) => {
   res.json({
     ok: true,
-    llm: isLlmConfigured(),
-    llmNote: isLlmConfigured() ? null : 'DEEPSEEK_API_KEY 未配置或格式可疑，将使用演示文案',
+    llm: llmKeyUsable(),
+    llmNote: llmKeyUsable() ? null : 'DEEPSEEK_API_KEY 未配置或格式可疑，将使用演示文案',
     channels: await channelStatus(),
     intelCron: (process.env.INTEL_ENABLED || '').toLowerCase() === 'true',
     intel: await intelStats()
@@ -100,7 +117,7 @@ app.get('/api/health', wrap(async (req, res) => {
 }));
 
 // ---- 核心生成（管线：生成 → 硬规则 → 软评分 → 去重 → 反思改写）----
-app.post('/api/generate', upload.array('images', 4), wrap(async (req, res) => {
+app.post('/api/generate', genRateLimit, upload.array('images', 4), wrap(async (req, res) => {
   const text = ((req.body && req.body.text) || '').trim();
   // 多图支持（2026-10-04 审核采纳）：最多 4 张（主图 + 群聊截图等常见组合），
   // 逐张识别后合并要素；全部降级才算降级；非图片文件如实提示
@@ -173,6 +190,15 @@ app.post('/api/generate', upload.array('images', 4), wrap(async (req, res) => {
 app.post('/api/feedback', wrap(async (req, res) => {
   const { kind, payload } = req.body || {};
   if (!kind) return res.status(400).json({ ok: false, error: 'kind required' });
+  // 【2026-10-06 审计 P2】payload.text 限长 + 控制字符过滤（与 /api/correction 同口径）：
+  // 选中反馈的 text 会进语气资产库并作为 few-shot 注入 prompt——
+  // 无上限的超大/带控制字符文本是存储与提示注入双重隐患。
+  if (payload && typeof payload.text === 'string') {
+    payload = {
+      ...payload,
+      text: payload.text.replace(/[\x00-\x08\x0B\x0C\x0E-\x1F]/g, '').slice(0, 2000)
+    };
+  }
   await recordFeedback({ kind, payload });
   res.json({ ok: true });
 }));
